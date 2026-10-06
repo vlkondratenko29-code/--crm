@@ -334,7 +334,8 @@ async def chatterfy_webhook(request: Request, email: str | None = None, chat_id:
 @app.post("/api/v1/broker/fxpro/import")
 async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
-    if not username or not is_admin(username):
+    user = require_access(username)
+    if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
 
     conn = None
@@ -379,8 +380,7 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
 @app.get("/api/v1/clients/search")
 def search_clients(q: str, x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
-    if not username:
-        raise HTTPException(status_code=401, detail="Telegram user is required")
+    require_access(username)
     conn = db()
     term = "%" + q.strip().lower() + "%"
     rows = conn.execute("SELECT * FROM broker_clients WHERE lower(email) LIKE %s OR lower(coalesce(click_id,'')) LIKE %s LIMIT 20", (term, term)).fetchall()
@@ -399,8 +399,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
 @app.get("/api/v1/dashboard")
 def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
-    if not username:
-        raise HTTPException(status_code=401, detail="Telegram user is required")
+    user = require_access(username)
     conn = db()
     row = conn.execute("""
         SELECT COUNT(*) AS leads,
@@ -417,7 +416,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
         "ftd": row["ftd"] or 0,
         "ft": row["ft"] or 0,
         "deposits": row["deposits"] or 0,
-        "viewer": {"username": username, "role": "admin" if is_admin(username) else "handler"},
+        "viewer": {"username": user["username"], "role": user["role"]},
     }
 
 
