@@ -96,6 +96,18 @@ def db():
             last_synced_event TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_users (
+            username TEXT PRIMARY KEY,
+            role TEXT NOT NULL DEFAULT 'handler',
+            active INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    for admin_username in ("jokwq", "nodari777"):
+        conn.execute(
+            "INSERT OR IGNORE INTO crm_users(username, role, active) VALUES(?,?,1)",
+            (admin_username, "admin"),
+        )
     conn.commit()
     return conn
 
