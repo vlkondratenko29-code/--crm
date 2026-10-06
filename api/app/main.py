@@ -1,8 +1,11 @@
 from datetime import datetime
 import csv
+import os
+import sqlite3
 import io
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 
 from .config import is_admin
@@ -16,7 +19,8 @@ def db():
     conn.commit()
     return conn
 
-app = FastAPI(title="Broker CRM API", version="0.4.0")
+app = FastAPI(title="Broker CRM API", version="0.5.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
 class LeadIn(BaseModel):
@@ -125,7 +129,10 @@ def chatterfy_webhook(payload: LeadIn):
 
 
 @app.post("/api/v1/broker/fxpro/import")
-async def import_fxpro_report(file: UploadFile = File(...)):
+async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username: str = Header(default="")):
+    username = x_telegram_username.lstrip("@").strip()
+    if not username or not is_admin(username):
+        raise HTTPException(status_code=403, detail="Admin access required")
     raw = await file.read()
     clients = parse_fxpro_report(raw)
     conn = db()
@@ -165,11 +172,21 @@ def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
     if not username:
         raise HTTPException(status_code=401, detail="Telegram user is required")
+    conn = db()
+    row = conn.execute("""
+        SELECT COUNT(*) AS leads,
+               SUM(CASE WHEN registration_date IS NOT NULL THEN 1 ELSE 0 END) AS reg,
+               SUM(CASE WHEN first_fund_date IS NOT NULL THEN 1 ELSE 0 END) AS ftd,
+               SUM(CASE WHEN first_trade_date IS NOT NULL THEN 1 ELSE 0 END) AS ft,
+               COALESCE(SUM(first_fund_amount), 0) AS deposits
+        FROM broker_clients
+    """).fetchone()
+    conn.close()
     return {
-        "leads": 184,
-        "reg": 121,
-        "ftd": 47,
-        "ft": 31,
-        "deposits": 12840,
+        "leads": row["leads"] or 0,
+        "reg": row["reg"] or 0,
+        "ftd": row["ftd"] or 0,
+        "ft": row["ft"] or 0,
+        "deposits": row["deposits"] or 0,
         "viewer": {"username": username, "role": "admin" if is_admin(username) else "handler"},
     }
