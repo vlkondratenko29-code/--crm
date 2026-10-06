@@ -88,7 +88,13 @@ function App() {
                 method: "POST", body: form,
                 headers: { "X-Telegram-Username": user.username || "jokwq" }
               });
-              const data = await res.json();
+              const responseText = await res.text();
+              let data;
+              try {
+                data = JSON.parse(responseText);
+              } catch {
+                throw new Error(responseText.replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 300) || `Import failed (HTTP ${res.status})`);
+              }
               if (!res.ok) throw new Error(data.detail || "Import failed");
               setImportMessage(`Imported ${data.rows} clients`);
               const dashboard = await fetch(`${base}/api/v1/dashboard`, {
