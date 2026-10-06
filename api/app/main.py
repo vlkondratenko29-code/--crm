@@ -243,19 +243,21 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
     username = x_telegram_username.lstrip("@").strip()
     if not username or not is_admin(username):
         raise HTTPException(status_code=403, detail="Admin access required")
-    raw = await file.read()
-    clients = parse_fxpro_report(raw)
-    conn = db()
-    sql = """INSERT INTO broker_clients
-    (email,broker_id,status,country,click_id,registration_date,first_fund_date,first_fund_amount,first_trade_date,last_trade_date,net_deposits,deposits,latest_balance,trading_volume)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-    ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
-    keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
+
+    conn = None
     try:
+        raw = await file.read()
+        clients = parse_fxpro_report(raw)
+        conn = db()
+        sql = """INSERT INTO broker_clients
+        (email,broker_id,status,country,click_id,registration_date,first_fund_date,first_fund_amount,first_trade_date,last_trade_date,net_deposits,deposits,latest_balance,trading_volume)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
+        keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
         for client in clients:
             conn.execute(sql, tuple(client.get(k) for k in keys))
         conn.commit()
-        # Retry previously unmatched Chatterfy leads after every broker import.
+
         pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
         synced = 0
         for lead in pending:
@@ -271,10 +273,15 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
         conn.commit()
         return {"status":"ok","broker":"FxPro","rows":len(clients),"chatterfy_synced":synced}
     except Exception as exc:
-        conn.rollback()
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise HTTPException(status_code=500, detail=f"FxPro import failed: {type(exc).__name__}: {exc}")
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 @app.get("/api/v1/clients/search")
 def search_clients(q: str, x_telegram_username: str = Header(default="")):
