@@ -225,6 +225,59 @@ def sync_client_to_chatterfy(chat_id: str, client: dict):
         return {"sent": True, "status_code": response.status}
 
 
+def require_admin(username: str):
+    username = username.lstrip("@").strip().lower()
+    if username not in {"jokwq", "nodari777"}:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return username
+
+
+class TeamUser(BaseModel):
+    username: str
+    role: str
+    active: bool = True
+
+
+@app.get("/api/v1/users")
+def list_users(x_telegram_username: str = Header(default="")):
+    require_admin(x_telegram_username)
+    conn = db()
+    rows = conn.execute("SELECT username, role, active FROM crm_users ORDER BY username").fetchall()
+    conn.close()
+    return {"users": [dict(row) for row in rows]}
+
+
+@app.post("/api/v1/users")
+def upsert_user(payload: TeamUser, x_telegram_username: str = Header(default="")):
+    require_admin(x_telegram_username)
+    username = payload.username.lstrip("@").strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if payload.role not in {"admin", "head_buying", "seo", "handler"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    conn = db()
+    conn.execute(
+        "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
+        (username, payload.role, payload.active),
+    )
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/users/{username}")
+def deactivate_user(username: str, x_telegram_username: str = Header(default="")):
+    require_admin(x_telegram_username)
+    target = username.lstrip("@").strip().lower()
+    if target in {"jokwq", "nodari777"}:
+        raise HTTPException(status_code=400, detail="Primary admins cannot be deactivated")
+    conn = db()
+    conn.execute("UPDATE crm_users SET active=FALSE WHERE lower(username)=%s", (target,))
+    conn.commit()
+    conn.close()
+    return {"status": "ok"}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "broker-crm-api"}
