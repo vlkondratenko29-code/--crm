@@ -21,6 +21,9 @@ function App() {
   const [importMessage, setImportMessage] = useState("");
   const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
   const [tab, setTab] = useState("dashboard");
+  const [team, setTeam] = useState([]);
+  const [newUser, setNewUser] = useState("");
+  const [newRole, setNewRole] = useState("handler");
 
   React.useEffect(() => {
     tg?.ready?.();
@@ -39,7 +42,35 @@ function App() {
       }
     };
     loadDashboard();
+    loadTeam();
   }, [user.username]);
+
+  async function loadTeam() {
+    if (!user.is_admin) return;
+    const base = import.meta.env.VITE_API_URL || "";
+    const res = await fetch(base + "/api/v1/users", { headers: { "X-Telegram-Username": user.username || "jokwq" } });
+    if (res.ok) setTeam((await res.json()).users || []);
+  }
+
+  async function saveTeamUser() {
+    if (!newUser.trim()) return;
+    const base = import.meta.env.VITE_API_URL || "";
+    const res = await fetch(base + "/api/v1/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Username": user.username || "jokwq" },
+      body: JSON.stringify({ username: newUser.trim(), role: newRole, active: true })
+    });
+    if (res.ok) { setNewUser(""); await loadTeam(); }
+  }
+
+  async function disableTeamUser(username) {
+    const base = import.meta.env.VITE_API_URL || "";
+    const res = await fetch(base + "/api/v1/users/" + encodeURIComponent(username), {
+      method: "DELETE",
+      headers: { "X-Telegram-Username": user.username || "jokwq" }
+    });
+    if (res.ok) await loadTeam();
+  }
 
   async function search() {
     if (!query.trim()) return;
@@ -153,10 +184,18 @@ function App() {
       {tab === "admin" && user.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
-        <p>Team management is being connected to the CRM backend.</p>
-        <div className="client-grid">
-          <span>@jokwq</span><b>Admin</b>
-          <span>@Nodari777</span><b>Admin</b>
+        <div className="search">
+          <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="@telegram_username" />
+          <select value={newRole} onChange={e => setNewRole(e.target.value)}>
+            <option value="handler">Handler</option>
+            <option value="seo">SEO</option>
+            <option value="head_buying">Head of Buying</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button onClick={saveTeamUser}>Add</button>
+        </div>
+        <div className="timeline">
+          {team.map((member) => <div key={member.username}><b>@{member.username}</b><span>{member.role} · {member.active ? "active" : "off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
         </div>
       </section>}
       {loading && <section className="card"><p>Searching...</p></section>}
