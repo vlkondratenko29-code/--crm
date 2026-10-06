@@ -17,8 +17,32 @@ CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE IF NOT EXISTS broker_clients (email TEXT PRIMARY KEY, broker_id TEXT, status TEXT, country TEXT, click_id TEXT, registration_date TEXT, first_fund_date TEXT, first_fund_amount REAL, first_trade_date TEXT, last_trade_date TEXT, net_deposits REAL, deposits REAL, latest_balance REAL, trading_volume REAL)
-    conn.execute("CREATE TABLE IF NOT EXISTS chatterfy_leads (chat_id TEXT PRIMARY KEY, email TEXT, click_id TEXT, last_synced_event TEXT)")")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS broker_clients (
+            email TEXT PRIMARY KEY,
+            broker_id TEXT,
+            status TEXT,
+            country TEXT,
+            click_id TEXT,
+            registration_date TEXT,
+            first_fund_date TEXT,
+            first_fund_amount REAL,
+            first_trade_date TEXT,
+            last_trade_date TEXT,
+            net_deposits REAL,
+            deposits REAL,
+            latest_balance REAL,
+            trading_volume REAL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chatterfy_leads (
+            chat_id TEXT PRIMARY KEY,
+            email TEXT,
+            click_id TEXT,
+            last_synced_event TEXT
+        )
+    """)
     conn.commit()
     return conn
 
