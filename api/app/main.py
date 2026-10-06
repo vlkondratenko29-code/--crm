@@ -5,7 +5,8 @@ import sqlite3
 import io
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
-from fastapi.middleware.cors import CORSMiddleware\nfrom fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .config import is_admin
