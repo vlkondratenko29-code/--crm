@@ -16,7 +16,8 @@ CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("CREATE TABLE IF NOT EXISTS broker_clients (email TEXT PRIMARY KEY, broker_id TEXT, status TEXT, country TEXT, click_id TEXT, registration_date TEXT, first_fund_date TEXT, first_fund_amount REAL, first_trade_date TEXT, last_trade_date TEXT, net_deposits REAL, deposits REAL, latest_balance REAL, trading_volume REAL)")
+    conn.execute("CREATE TABLE IF NOT EXISTS broker_clients (email TEXT PRIMARY KEY, broker_id TEXT, status TEXT, country TEXT, click_id TEXT, registration_date TEXT, first_fund_date TEXT, first_fund_amount REAL, first_trade_date TEXT, last_trade_date TEXT, net_deposits REAL, deposits REAL, latest_balance REAL, trading_volume REAL)
+    conn.execute("CREATE TABLE IF NOT EXISTS chatterfy_leads (chat_id TEXT PRIMARY KEY, email TEXT, click_id TEXT, last_synced_event TEXT)")")
     conn.commit()
     return conn
 
@@ -166,6 +167,10 @@ async def chatterfy_webhook(request: Request, email: str | None = None, chat_id:
             pass
     if not email or not chat_id:
         raise HTTPException(status_code=400, detail="email and chat_id are required")
+    conn = db()
+    conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id", (chat_id, email.strip().lower(), click_id))
+    conn.commit()
+    conn.close()
     client = find_client(email, click_id)
     if not client:
         return {"status": "pending", "matched": False, "email": email, "chat_id": chat_id}
@@ -188,9 +193,22 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
     keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
     for client in clients:
         conn.execute(sql, tuple(client.get(k) for k in keys))
+    # Retry previously unmatched Chatterfy leads after every broker import.
+    pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
+    synced = 0
+    for lead in pending:
+        client = find_client(lead["email"], lead["click_id"])
+        if client:
+            try:
+                sync_client_to_chatterfy(lead["chat_id"], client)
+                event = "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG")
+                conn.execute("UPDATE chatterfy_leads SET last_synced_event=? WHERE chat_id=?", (event, lead["chat_id"]))
+                synced += 1
+            except Exception:
+                pass
     conn.commit()
     conn.close()
-    return {"status":"ok","broker":"FxPro","rows":len(clients)}
+    return {"status":"ok","broker":"FxPro","rows":len(clients),"chatterfy_synced":synced}
 
 @app.get("/api/v1/clients/search")
 def search_clients(q: str, x_telegram_username: str = Header(default="")):
