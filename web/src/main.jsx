@@ -18,10 +18,26 @@ function App() {
     return { username, role: admin ? "admin" : "handler", is_admin: admin };
   }, [telegramUser]);
   const [query, setQuery] = useState("");
+  const [client, setClient] = useState(null);
+  const [loading, setLoading] = useState(false);
 
-  function search() {
-    // Real client search will be connected after FxPro CSV import.
-    alert(query ? `Search: ${query}` : "Enter email or Click ID");
+  async function search() {
+    if (!query.trim()) return;
+    setLoading(true);
+    try {
+      const base = import.meta.env.VITE_API_URL || "";
+      const response = await fetch(`${base}/api/v1/clients/search?q=${encodeURIComponent(query)}`, {
+        headers: { "X-Telegram-Username": user.username || "jokwq" }
+      });
+      if (!response.ok) throw new Error("Search failed");
+      const data = await response.json();
+      setClient(data.clients?.[0] || null);
+    } catch (error) {
+      console.error(error);
+      setClient(null);
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
@@ -54,17 +70,24 @@ function App() {
         </div>
       </section>
 
-      <section className="card">
+      {loading && <section className="card"><p>Searching...</p></section>}
+      {client && <section className="card">
         <div className="card-title">
-          <div><p className="eyebrow">RECENT CONVERSION</p><h2>gabrielrcorrea@hotmail.com</h2></div>
-          <span className="badge">FTD</span>
+          <div><p className="eyebrow">CLIENT</p><h2>{client.email}</h2></div>
+          <span className="badge">{client.events?.at(-1)?.type || "LEAD"}</span>
+        </div>
+        <div className="client-grid">
+          <span>Broker ID</span><b>{client.broker_id || "—"}</b>
+          <span>Click ID</span><b>{client.click_id || "—"}</b>
+          <span>Country</span><b>{client.country || "—"}</b>
+          <span>Status</span><b>{client.status || "—"}</b>
+          <span>Deposit</span><b>{client.first_fund_amount != null ? "$" + client.first_fund_amount : "—"}</b>
         </div>
         <div className="timeline">
-          <div><b>REG</b><span>13.08.2026</span></div>
-          <div><b>FTD</b><span>16.08.2026 · $247.84</span></div>
-          <div><b>FT</b><span>17.08.2026</span></div>
+          {(client.events || []).map((event) => <div key={event.type}><b>{event.type}</b><span>{event.date}{event.amount != null ? " · $" + event.amount : ""}</span></div>)}
         </div>
-      </section>
+      </section>}
+      {!loading && !client && query && <section className="card"><p>No client found.</p></section>}
 
       <nav><button className="active">Dashboard</button><button>Clients</button><button>Stats</button><button>{user.is_admin ? "Admin" : "Profile"}</button></nav>
     </main>
