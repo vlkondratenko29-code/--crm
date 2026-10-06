@@ -52,6 +52,18 @@ def db():
                 last_synced_event TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_users (
+                username TEXT PRIMARY KEY,
+                role TEXT NOT NULL DEFAULT 'handler',
+                active BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        """)
+        for admin_username in ("jokwq", "nodari777"):
+            conn.execute(
+                "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
+                (admin_username,),
+            )
         conn.commit()
         return conn
 
