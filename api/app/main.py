@@ -5,7 +5,7 @@ import sqlite3
 import io
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware\nfrom fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr
 
 from .config import is_admin
@@ -254,3 +254,8 @@ def dashboard(x_telegram_username: str = Header(default="")):
         "deposits": row["deposits"] or 0,
         "viewer": {"username": username, "role": "admin" if is_admin(username) else "handler"},
     }
+
+
+# Serve the built Telegram Mini App from the same HTTPS origin as the API.
+# API routes are registered above, so this catch-all only handles frontend assets/pages.
+app.mount("/", StaticFiles(directory="/app/web/dist", html=True), name="web")
