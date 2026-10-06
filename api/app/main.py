@@ -193,6 +193,7 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
     keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
     for client in clients:
         conn.execute(sql, tuple(client.get(k) for k in keys))
+    conn.commit()
     # Retry previously unmatched Chatterfy leads after every broker import.
     pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
     synced = 0
