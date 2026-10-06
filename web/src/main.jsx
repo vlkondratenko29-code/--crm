@@ -153,7 +153,7 @@ function App() {
           ["FT", stats.ft],
           ["Deposits", `${Number(stats.deposits || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
         ].map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
-      </section>
+      </section>}
 
       {tab === "dashboard" && <section className="search-card">
         <h2>Find client</h2>
