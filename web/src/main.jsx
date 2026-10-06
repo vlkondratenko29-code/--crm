@@ -20,6 +20,8 @@ function App() {
   const [query, setQuery] = useState("");
   const [client, setClient] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importMessage, setImportMessage] = useState("");
 
   async function search() {
     if (!query.trim()) return;
@@ -56,6 +58,28 @@ function App() {
         <p className="eyebrow">ADMIN ACCESS</p>
         <h2>Full CRM access enabled</h2>
         <p>Clients · Analytics · Team · Settings</p>
+        <label className="upload-btn">
+          {importing ? "Uploading..." : "Upload FxPro CSV"}
+          <input type="file" accept=".csv,text/csv" disabled={importing} onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            setImporting(true); setImportMessage("");
+            try {
+              const base = import.meta.env.VITE_API_URL || "";
+              const form = new FormData(); form.append("file", file);
+              const res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
+                method: "POST", body: form,
+                headers: { "X-Telegram-Username": user.username || "jokwq" }
+              });
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.detail || "Import failed");
+              setImportMessage(`Imported ${data.rows} clients`);
+            } catch (err) {
+              setImportMessage(err.message);
+            } finally { setImporting(false); e.target.value = ""; }
+          }} />
+        </label>
+        {importMessage && <p>{importMessage}</p>}
       </section>}
 
       <section className="stats">
