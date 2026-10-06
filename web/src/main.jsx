@@ -20,6 +20,7 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
   const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
+  const [tab, setTab] = useState("dashboard");
 
   React.useEffect(() => {
     tg?.ready?.();
@@ -57,6 +58,10 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  function NavButton({ id, children }) {
+    return <button className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{children}</button>;
   }
 
   return (
@@ -109,7 +114,7 @@ function App() {
         {importMessage && <p>{importMessage}</p>}
       </section>}
 
-      <section className="stats">
+      {tab === "dashboard" && <section className="stats">
         {[
           ["Leads", stats.leads],
           ["REG", stats.reg],
@@ -119,7 +124,7 @@ function App() {
         ].map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
       </section>
 
-      <section className="search-card">
+      {tab === "dashboard" && <section className="search-card">
         <h2>Find client</h2>
         <div className="search">
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Email or Click ID" />
@@ -127,6 +132,33 @@ function App() {
         </div>
       </section>
 
+      {tab === "clients" && <section className="search-card">
+        <h2>Find client</h2>
+        <div className="search">
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Email or Click ID" />
+          <button onClick={search}>Search</button>
+        </div>
+      </section>}
+      {tab === "stats" && <section className="card">
+        <p className="eyebrow">ANALYTICS</p>
+        <h2>CRM Statistics</h2>
+        <div className="client-grid">
+          <span>Leads</span><b>{stats.leads}</b>
+          <span>REG</span><b>{stats.reg}</b>
+          <span>FTD</span><b>{stats.ftd}</b>
+          <span>FT</span><b>{stats.ft}</b>
+          <span>Deposits</span><b>{Number(stats.deposits || 0).toFixed(2)}</b>
+        </div>
+      </section>}
+      {tab === "admin" && user.is_admin && <section className="card">
+        <p className="eyebrow">TEAM</p>
+        <h2>Team access</h2>
+        <p>Team management is being connected to the CRM backend.</p>
+        <div className="client-grid">
+          <span>@jokwq</span><b>Admin</b>
+          <span>@Nodari777</span><b>Admin</b>
+        </div>
+      </section>}
       {loading && <section className="card"><p>Searching...</p></section>}
       {client && <section className="card">
         <div className="card-title">
@@ -146,7 +178,12 @@ function App() {
       </section>}
       {!loading && !client && query && <section className="card"><p>No client found.</p></section>}
 
-      <nav><button className="active">Dashboard</button><button>Clients</button><button>Stats</button><button>{user.is_admin ? "Admin" : "Profile"}</button></nav>
+      <nav>
+        <NavButton id="dashboard">Dashboard</NavButton>
+        <NavButton id="clients">Clients</NavButton>
+        <NavButton id="stats">Stats</NavButton>
+        <NavButton id="admin">{user.is_admin ? "Admin" : "Profile"}</NavButton>
+      </nav>
     </main>
   );
 }
