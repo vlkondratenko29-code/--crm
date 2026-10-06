@@ -91,6 +91,10 @@ function App() {
               const data = await res.json();
               if (!res.ok) throw new Error(data.detail || "Import failed");
               setImportMessage(`Imported ${data.rows} clients`);
+              const dashboard = await fetch(`${base}/api/v1/dashboard`, {
+                headers: { "X-Telegram-Username": user.username || "jokwq" }
+              });
+              if (dashboard.ok) setStats(await dashboard.json());
             } catch (err) {
               setImportMessage(err.message);
             } finally { setImporting(false); e.target.value = ""; }
