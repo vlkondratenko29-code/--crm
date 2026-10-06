@@ -5,16 +5,13 @@ import "./styles.css";
 const tg = window.Telegram?.WebApp;
 const demoUser = { username: "jokwq", role: "admin", is_admin: true };
 
-const stats = [
-  ["Leads", "184"], ["REG", "121"], ["FTD", "47"], ["FT", "31"], ["Deposits", "$12,840"],
-];
 
 function App() {
   const telegramUser = tg?.initDataUnsafe?.user;
   const user = useMemo(() => {
     if (!telegramUser) return demoUser;
     const username = telegramUser.username || "";
-    const admin = ["jokwq", "Nodari777"].includes(username.toLowerCase());
+    const admin = ["jokwq", "nodari777"].includes(username.toLowerCase());
     return { username, role: admin ? "admin" : "handler", is_admin: admin };
   }, [telegramUser]);
   const [query, setQuery] = useState("");
@@ -22,6 +19,26 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
+  const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
+
+  React.useEffect(() => {
+    tg?.ready?.();
+    tg?.expand?.();
+    const loadDashboard = async () => {
+      try {
+        const base = import.meta.env.VITE_API_URL || "";
+        const response = await fetch(`${base}/api/v1/dashboard`, {
+          headers: { "X-Telegram-Username": user.username || "jokwq" }
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        setStats(data);
+      } catch (error) {
+        console.error(error);
+      }
+    };
+    loadDashboard();
+  }, [user.username]);
 
   async function search() {
     if (!query.trim()) return;
@@ -83,7 +100,13 @@ function App() {
       </section>}
 
       <section className="stats">
-        {stats.map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
+        {[
+          ["Leads", stats.leads],
+          ["REG", stats.reg],
+          ["FTD", stats.ftd],
+          ["FT", stats.ft],
+          ["Deposits", `${Number(stats.deposits || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
+        ].map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
       </section>
 
       <section className="search-card">
