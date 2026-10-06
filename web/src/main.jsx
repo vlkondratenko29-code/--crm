@@ -161,7 +161,7 @@ function App() {
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Email or Click ID" />
           <button onClick={search}>Search</button>
         </div>
-      </section>
+      </section>}
 
       {tab === "clients" && <section className="search-card">
         <h2>Find client</h2>
