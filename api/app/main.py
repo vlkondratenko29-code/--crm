@@ -4,13 +4,14 @@ import os
 import sqlite3
 import io
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 
 from .config import is_admin
 
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
+CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
 
 def db():
     conn = sqlite3.connect(DB_PATH)
@@ -103,6 +104,41 @@ def parse_fxpro_report(raw: bytes):
 
     return clients
 
+def find_client(email: str | None, click_id: str | None = None):
+    conn = db()
+    row = None
+    if email:
+        row = conn.execute("SELECT * FROM broker_clients WHERE lower(email)=?", (email.strip().lower(),)).fetchone()
+    if row is None and click_id:
+        row = conn.execute("SELECT * FROM broker_clients WHERE lower(coalesce(click_id,''))=?", (click_id.strip().lower(),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def sync_client_to_chatterfy(chat_id: str, client: dict):
+    if not CHATTERFY_WEBHOOK_URL:
+        return {"sent": False, "reason": "CHATTERFY_WEBHOOK_URL is not configured"}
+
+    import urllib.parse
+    import urllib.request
+
+    params = {
+        "chat_id": chat_id,
+        "fields.broker_id": client.get("broker_id") or "",
+        "fields.broker_event": "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG"),
+        "fields.datereg": client.get("registration_date") or "",
+        "fields.deposit_amount": client.get("first_fund_amount") if client.get("first_fund_amount") is not None else "",
+    }
+    tags = []
+    if client.get("registration_date"): tags.append("REG")
+    if client.get("first_fund_date"): tags.append("FTD")
+    if client.get("first_trade_date"): tags.append("FT")
+    if tags:
+        params["assign_tags"] = ",".join(tags)
+    url = CHATTERFY_WEBHOOK_URL + ("&" if "?" in CHATTERFY_WEBHOOK_URL else "?") + urllib.parse.urlencode(params)
+    with urllib.request.urlopen(url, timeout=10) as response:
+        return {"sent": True, "status_code": response.status}
+
 
 @app.get("/health")
 def health():
@@ -118,14 +154,23 @@ def me(x_telegram_username: str = Header(default="")):
     return {"username": username, "role": "admin" if admin else "handler", "is_admin": admin}
 
 
-@app.post("/webhook/chatterfy")
-def chatterfy_webhook(payload: LeadIn):
-    return {
-        "status": "received",
-        "email": payload.email,
-        "chat_id": payload.chat_id,
-        "click_id": payload.click_id,
-    }
+@app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
+async def chatterfy_webhook(request: Request, email: str | None = None, chat_id: str | None = None, click_id: str | None = None):
+    if request.method == "POST":
+        try:
+            payload = await request.json()
+            email = email or payload.get("email")
+            chat_id = chat_id or payload.get("chat_id") or payload.get("chatId")
+            click_id = click_id or payload.get("click_id") or payload.get("clickId")
+        except Exception:
+            pass
+    if not email or not chat_id:
+        raise HTTPException(status_code=400, detail="email and chat_id are required")
+    client = find_client(email, click_id)
+    if not client:
+        return {"status": "pending", "matched": False, "email": email, "chat_id": chat_id}
+    sync = sync_client_to_chatterfy(chat_id, client)
+    return {"status": "ok", "matched": True, "email": email, "chat_id": chat_id, "sync": sync}
 
 
 @app.post("/api/v1/broker/fxpro/import")
