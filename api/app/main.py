@@ -251,25 +251,30 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
     keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
-    for client in clients:
-        conn.execute(sql, tuple(client.get(k) for k in keys))
-    conn.commit()
-    # Retry previously unmatched Chatterfy leads after every broker import.
-    pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
-    synced = 0
-    for lead in pending:
-        client = find_client(lead["email"], lead["click_id"])
-        if client:
-            try:
-                sync_client_to_chatterfy(lead["chat_id"], client)
-                event = "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG")
-                conn.execute("UPDATE chatterfy_leads SET last_synced_event=%s WHERE chat_id=%s", (event, lead["chat_id"]))
-                synced += 1
-            except Exception:
-                pass
-    conn.commit()
-    conn.close()
-    return {"status":"ok","broker":"FxPro","rows":len(clients),"chatterfy_synced":synced}
+    try:
+        for client in clients:
+            conn.execute(sql, tuple(client.get(k) for k in keys))
+        conn.commit()
+        # Retry previously unmatched Chatterfy leads after every broker import.
+        pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
+        synced = 0
+        for lead in pending:
+            client = find_client(lead["email"], lead["click_id"])
+            if client:
+                try:
+                    sync_client_to_chatterfy(lead["chat_id"], client)
+                    event = "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG")
+                    conn.execute("UPDATE chatterfy_leads SET last_synced_event=%s WHERE chat_id=%s", (event, lead["chat_id"]))
+                    synced += 1
+                except Exception:
+                    pass
+        conn.commit()
+        return {"status":"ok","broker":"FxPro","rows":len(clients),"chatterfy_synced":synced}
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"FxPro import failed: {type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
 
 @app.get("/api/v1/clients/search")
 def search_clients(q: str, x_telegram_username: str = Header(default="")):
