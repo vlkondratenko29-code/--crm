@@ -236,10 +236,10 @@ def require_access(username: str):
 
 
 def require_admin(username: str):
-    username = username.lstrip("@").strip().lower()
-    if username not in {"jokwq", "nodari777"}:
+    user = require_access(username)
+    if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
-    return username
+    return user["username"]
 
 
 class TeamUser(BaseModel):
