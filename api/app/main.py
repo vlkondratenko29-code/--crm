@@ -225,6 +225,16 @@ def sync_client_to_chatterfy(chat_id: str, client: dict):
         return {"sent": True, "status_code": response.status}
 
 
+def require_access(username: str):
+    username = username.lstrip("@").strip().lower()
+    conn = db()
+    row = conn.execute("SELECT username, role, active FROM crm_users WHERE lower(username)=%s", (username,)).fetchone()
+    conn.close()
+    if not row or not row["active"]:
+        raise HTTPException(status_code=403, detail="CRM access is not granted")
+    return dict(row)
+
+
 def require_admin(username: str):
     username = username.lstrip("@").strip().lower()
     if username not in {"jokwq", "nodari777"}:
@@ -276,6 +286,12 @@ def deactivate_user(username: str, x_telegram_username: str = Header(default="")
     conn.commit()
     conn.close()
     return {"status": "ok"}
+
+
+@app.get("/api/v1/me", response_model=UserMe)
+def me(x_telegram_username: str = Header(default="")):
+    user = require_access(x_telegram_username)
+    return {"username": user["username"], "role": user["role"], "is_admin": user["role"] == "admin"}
 
 
 @app.get("/health")
