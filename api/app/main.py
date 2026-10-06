@@ -299,15 +299,6 @@ def health():
     return {"status": "ok", "service": "broker-crm-api"}
 
 
-@app.get("/api/v1/me", response_model=UserMe)
-def me(x_telegram_username: str = Header(default="")):
-    username = x_telegram_username.lstrip("@").strip()
-    if not username:
-        raise HTTPException(status_code=401, detail="Telegram user is required")
-    admin = is_admin(username)
-    return {"username": username, "role": "admin" if admin else "handler", "is_admin": admin}
-
-
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
 async def chatterfy_webhook(request: Request, email: str | None = None, chat_id: str | None = None, click_id: str | None = None):
     if request.method == "POST":
