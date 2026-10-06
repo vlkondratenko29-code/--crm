@@ -1,8 +1,14 @@
 from datetime import datetime
 import csv
 import os
-import sqlite3
 import io
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,10 +17,45 @@ from pydantic import BaseModel
 
 from .config import is_admin
 
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
 CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
 
 def db():
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError("psycopg is required when DATABASE_URL is configured")
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS broker_clients (
+                email TEXT PRIMARY KEY,
+                broker_id TEXT,
+                status TEXT,
+                country TEXT,
+                click_id TEXT,
+                registration_date TEXT,
+                first_fund_date TEXT,
+                first_fund_amount DOUBLE PRECISION,
+                first_trade_date TEXT,
+                last_trade_date TEXT,
+                net_deposits DOUBLE PRECISION,
+                deposits DOUBLE PRECISION,
+                latest_balance DOUBLE PRECISION,
+                trading_volume DOUBLE PRECISION
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chatterfy_leads (
+                chat_id TEXT PRIMARY KEY,
+                email TEXT,
+                click_id TEXT,
+                last_synced_event TEXT
+            )
+        """)
+        conn.commit()
+        return conn
+
+    import sqlite3
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("""
@@ -128,9 +169,9 @@ def find_client(email: str | None, click_id: str | None = None):
     conn = db()
     row = None
     if email:
-        row = conn.execute("SELECT * FROM broker_clients WHERE lower(email)=?", (email.strip().lower(),)).fetchone()
+        row = conn.execute("SELECT * FROM broker_clients WHERE lower(email)=%s", (email.strip().lower(),)).fetchone()
     if row is None and click_id:
-        row = conn.execute("SELECT * FROM broker_clients WHERE lower(coalesce(click_id,''))=?", (click_id.strip().lower(),)).fetchone()
+        row = conn.execute("SELECT * FROM broker_clients WHERE lower(coalesce(click_id,''))=%s", (click_id.strip().lower(),)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -187,7 +228,7 @@ async def chatterfy_webhook(request: Request, email: str | None = None, chat_id:
     if not email or not chat_id:
         raise HTTPException(status_code=400, detail="email and chat_id are required")
     conn = db()
-    conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id", (chat_id, email.strip().lower(), click_id))
+    conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id) VALUES(%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id", (chat_id, email.strip().lower(), click_id))
     conn.commit()
     conn.close()
     client = find_client(email, click_id)
@@ -222,7 +263,7 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
             try:
                 sync_client_to_chatterfy(lead["chat_id"], client)
                 event = "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG")
-                conn.execute("UPDATE chatterfy_leads SET last_synced_event=? WHERE chat_id=?", (event, lead["chat_id"]))
+                conn.execute("UPDATE chatterfy_leads SET last_synced_event=%s WHERE chat_id=%s", (event, lead["chat_id"]))
                 synced += 1
             except Exception:
                 pass
@@ -237,7 +278,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
         raise HTTPException(status_code=401, detail="Telegram user is required")
     conn = db()
     term = "%" + q.strip().lower() + "%"
-    rows = conn.execute("SELECT * FROM broker_clients WHERE lower(email) LIKE ? OR lower(coalesce(click_id,'')) LIKE ? LIMIT 20", (term, term)).fetchall()
+    rows = conn.execute("SELECT * FROM broker_clients WHERE lower(email) LIKE %s OR lower(coalesce(click_id,'')) LIKE %s LIMIT 20", (term, term)).fetchall()
     conn.close()
     result = []
     for row in rows:
