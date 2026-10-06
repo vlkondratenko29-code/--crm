@@ -6,7 +6,7 @@ import io
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware\nfrom fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from .config import is_admin
 
@@ -23,12 +23,6 @@ def db():
 
 app = FastAPI(title="Broker CRM API", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
-
-
-class LeadIn(BaseModel):
-    email: EmailStr
-    chat_id: str
-    click_id: str | None = None
 
 
 class UserMe(BaseModel):
@@ -258,4 +252,5 @@ def dashboard(x_telegram_username: str = Header(default="")):
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
 # API routes are registered above, so this catch-all only handles frontend assets/pages.
-app.mount("/", StaticFiles(directory="/app/web/dist", html=True), name="web")
+if os.path.isdir("/app/web/dist"):
+    app.mount("/", StaticFiles(directory="/app/web/dist", html=True), name="web")
