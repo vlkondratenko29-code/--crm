@@ -21,6 +21,7 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
   const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
+  const [finance, setFinance] = useState(null);
   const [tab, setTab] = useState("dashboard");
   const [team, setTeam] = useState([]);
   const [newUser, setNewUser] = useState("");
@@ -33,8 +34,8 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "admin"] },
-    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "admin"] },
+    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
   }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
@@ -77,6 +78,10 @@ function App() {
   React.useEffect(() => {
     if (effectiveUser.is_admin) loadTeam();
   }, [effectiveUser.username, effectiveUser.is_admin]);
+
+  React.useEffect(() => { if (canSee("finance")) loadFinance(); }, [effectiveUser.username, effectiveUser.role, tab]);
+
+  async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
 
   async function loadTeam() {
     if (!effectiveUser.is_admin) return;
@@ -337,10 +342,21 @@ function App() {
       </section>}
       {!loading && !client && query && <section className="card"><p>No client found.</p></section>}
 
+      {tab === "finance" && canSee("finance") && <section className="role-dashboard finance-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">FINANCE · FXPRO</p><h2>Deposits & cash flow</h2><p>Account-level financial performance from the latest FxPro report.</p></div><span>💰</span></div>
+        <div className="exec-kpis">
+          <div><span>DEPOSITS</span><b>{"$" + Number(finance?.deposits || 0).toFixed(2)}</b></div><div><span>WITHDRAWALS</span><b>{"$" + Number(finance?.withdrawals || 0).toFixed(2)}</b></div><div><span>NET DEPOSITS</span><b>{"$" + Number(finance?.net_deposits || 0).toFixed(2)}</b></div>
+          <div><span>LIVE BALANCE</span><b>{"$" + Number(finance?.balance || 0).toFixed(2)}</b></div><div><span>FTD</span><b>{finance?.ftd_count || 0}</b></div><div><span>AVG FTD</span><b>{"$" + Number(finance?.avg_ftd || 0).toFixed(2)}</b></div>
+        </div>
+        <div className="section-title">By GEO</div>
+        <div className="geo-table">{(finance?.geo || []).map(x => <div className="finance-row" key={x.country}><b>{x.country}</b><span>{"$" + Number(x.deposits || 0).toFixed(0) + " dep"}</span><span>{"$" + Number(x.withdrawals || 0).toFixed(0) + " wd"}</span><strong>{"$" + Number(x.net || 0).toFixed(0) + " net"}</strong></div>)}</div>
+        <div className="finance-note">Source: FxPro account report · {finance?.accounts || 0} accounts</div>
+      </section>}
       <nav>
         <NavButton id="dashboard">Dashboard</NavButton>
         <NavButton id="clients">Clients</NavButton>
         {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
+        {canSee("finance") && <NavButton id="finance">Finance</NavButton>}
         {effectiveUser.is_admin && <NavButton id="admin">Admin</NavButton>}
       </nav>
     </main>
