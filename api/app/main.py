@@ -310,11 +310,24 @@ def parse_fxpro_clients_report(raw: bytes):
     rows = list(reader)
 
     def value(row, *names):
-        normalized = {str(k).strip().lower().replace("\ufeff", "").replace('"', ""): v for k, v in row.items() if k is not None}
+        normalized = {}
+        for k, v in row.items():
+            if k is None:
+                continue
+            key = str(k).strip().lower().replace("\\ufeff", "").replace('"', "")
+            normalized[key] = v
+            normalized[key.replace(" ", "").replace("_", "").replace("-", "")] = v
         for name in names:
-            v = normalized.get(name.lower())
+            clean_name = str(name).lower()
+            v = normalized.get(clean_name)
+            if v in (None, ""):
+                v = normalized.get(clean_name.replace(" ", "").replace("_", "").replace("-", ""))
             if v not in (None, ""):
                 return v
+        for v in row.values():
+            text = str(v or "").strip()
+            if "@" in text and "." in text.split("@")[-1]:
+                return text
         return None
 
     accounts = []
@@ -322,7 +335,7 @@ def parse_fxpro_clients_report(raw: bytes):
         login = str(value(row, "Логин", "Login", "Account", "Account ID") or "").strip()
         if not login:
             continue
-        email = (value(row, "Email", "Email Address", "EmailAddress", "email") or "").strip().lower()
+        email = (value(row, "Email", "Email Address", "EmailAddress", "E-mail", "E Mail") or "").strip().lower()
         if email and "@" not in email:
             email = ""
         deposits = to_float(value(row, "Депозиты", "Deposits"))
@@ -694,7 +707,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             )
         """).fetchone()
         email_linked_clients = int(linked_row["c"] or 0)
-        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"email_linked_clients":email_linked_clients,"file_types":file_types}
+        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"accounts_with_email":imported_accounts_with_email,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"email_linked_clients":email_linked_clients,"file_types":file_types}
     except Exception as exc:
         if conn is not None:
             try:
