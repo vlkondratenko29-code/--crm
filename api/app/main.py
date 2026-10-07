@@ -1176,6 +1176,48 @@ def operations(x_telegram_username: str = Header(default="")):
     }
 
 
+@app.get("/api/v1/alerts")
+def alerts(x_telegram_username: str = Header(default="")):
+    username = x_telegram_username.lstrip("@").strip()
+    user = require_access(username)
+    if user["role"] not in ("admin", "head_buying", "handler"):
+        raise HTTPException(status_code=403, detail="Alerts access required")
+    conn = db()
+    try:
+        leads = conn.execute("SELECT email, chat_id, click_id, attribution_json FROM chatterfy_leads WHERE email IS NOT NULL AND trim(email) <> '' ORDER BY chat_id DESC LIMIT 100").fetchall()
+        accounts = conn.execute("SELECT DISTINCT lower(trim(email)) AS email FROM fxpro_accounts WHERE email IS NOT NULL AND trim(email) <> ''").fetchall()
+        events = conn.execute("SELECT email, event_type, event_date, amount, broker_id, fxpro_login, chat_id, created_at FROM crm_events WHERE source = 'chatterfy' ORDER BY created_at DESC LIMIT 30").fetchall()
+    finally:
+        conn.close()
+    account_emails = {str(r["email"]).lower() for r in accounts if r["email"]}
+    import json
+    pending = []
+    missing_attribution = []
+    for row in leads:
+        try:
+            attr = json.loads(row["attribution_json"]) if row["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in attr.items()}
+        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
+        source = attribution_text(attr, "tracker_source_name", "tracker_source")
+        click = attribution_text(attr, "clickid") or row["click_id"]
+        item = {"email": row["email"], "chat_id": row["chat_id"], "click_id": click, "campaign": campaign, "source": source}
+        if row["email"].strip().lower() not in account_emails:
+            pending.append(item)
+        if not click and not campaign and not source:
+            missing_attribution.append({"email": row["email"], "chat_id": row["chat_id"]})
+    unlinked_events = []
+    missing_amount = []
+    for row in events:
+        item = dict(row)
+        if (row["email"] or "").strip().lower() not in account_emails:
+            unlinked_events.append(item)
+        if str(row["event_type"] or "").upper() == "FTD" and (row["amount"] is None or float(row["amount"] or 0) <= 0):
+            missing_amount.append(item)
+    return {"counts": {"pending_fxpro": len(pending), "missing_attribution": len(missing_attribution), "unlinked_events": len(unlinked_events), "ftd_missing_amount": len(missing_amount), "broker_events": len(events)}, "pending_fxpro": pending[:30], "missing_attribution": missing_attribution[:30], "unlinked_events": unlinked_events[:30], "ftd_missing_amount": missing_amount[:30], "broker_events": [dict(r) for r in events[:10]]}
+
+
 # Alerts module
 @app.get("/api/v1/dashboard")
 def dashboard(x_telegram_username: str = Header(default="")):
