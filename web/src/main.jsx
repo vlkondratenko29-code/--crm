@@ -25,6 +25,7 @@ function App() {
   const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
   const [finance, setFinance] = useState(null);
   const [traffic, setTraffic] = useState([]);
+  const [operations, setOperations] = useState(null);
   const [trafficCampaign, setTrafficCampaign] = useState("all");
   const [trafficSource, setTrafficSource] = useState("all");
   const [tab, setTab] = useState("dashboard");
@@ -39,7 +40,7 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "admin"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "operations", "admin"] },
     head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance", "traffic"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
@@ -83,10 +84,11 @@ function App() {
     if (effectiveUser.is_admin) loadTeam();
   }, [effectiveUser.username, effectiveUser.is_admin]);
 
-  React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); }, [effectiveUser.username, effectiveUser.role, tab]);
+  React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); if (canSee("operations")) loadOperations(); }, [effectiveUser.username, effectiveUser.role, tab]);
 
   async function loadTraffic() { if (!canSee("traffic")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/traffic", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setTraffic((await res.json()).rows || []); } catch (error) { console.error(error); } }
 
+  async function loadOperations() { if (!canSee("operations")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/operations", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setOperations(await res.json()); } catch (error) { console.error(error); } }
   async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
 
   async function loadTeam() {
@@ -392,6 +394,21 @@ function App() {
         <div className="buying-filters"><select value={trafficCampaign} onChange={e => setTrafficCampaign(e.target.value)}><option value="all">All campaigns</option>{[...new Set(traffic.map(x => x.campaign).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select><select value={trafficSource} onChange={e => setTrafficSource(e.target.value)}><option value="all">All sources</option>{[...new Set(traffic.map(x => x.source).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select></div>
         <div className="traffic-table">{traffic.filter(x => (trafficCampaign === "all" || x.campaign === trafficCampaign) && (trafficSource === "all" || x.source === trafficSource)).map((x,i) => <div className="traffic-card-row" key={x.campaign+x.source+x.adset+x.ad+i}><div><b>{x.campaign}</b><small>{x.source} · {x.adset}</small><small>{x.ad} · {x.placement}</small></div><span>{x.leads} leads</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><span>{x.ft} FT</span><span>{x.reg_to_ftd}%</span><strong>{"$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
       </section>}
+      {tab === "operations" && canSee("operations") && <section className="role-dashboard analytics-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">OPERATIONS</p><h2>CRM control</h2><p>Where attribution, FxPro accounts and broker events connect.</p></div><span>⚙️</span></div>
+        <div className="ops-grid">
+          <div><span>Chatterfy leads</span><b>{operations?.counts?.chatterfy_leads ?? 0}</b></div>
+          <div><span>Chatterfy emails</span><b>{operations?.counts?.chatterfy_emails ?? 0}</b></div>
+          <div><span>Linked to FxPro</span><b>{operations?.counts?.linked_emails ?? 0}</b></div>
+          <div><span>Need FxPro link</span><b>{operations?.counts?.unmatched_emails ?? 0}</b></div>
+          <div><span>FxPro emails</span><b>{operations?.counts?.fxpro_emails ?? 0}</b></div>
+          <div><span>CRM events</span><b>{operations?.counts?.events ?? 0}</b></div>
+        </div>
+        <div className="section-title">Chatterfy leads waiting for FxPro</div>
+        <div className="recent-list">{(operations?.unmatched || []).map((x,i) => <div key={x.email + "-" + i}><div><b>{x.email}</b><small>{x.campaign || "—"} · {x.source || "—"}</small></div><span>{x.click_id || "No Click ID"}</span></div>)}{!(operations?.unmatched || []).length && <div className="empty-state">No unmatched Chatterfy leads.</div>}</div>
+        <div className="section-title">Latest broker events</div>
+        <div className="recent-list">{(operations?.events || []).map((x,i) => <div key={x.email + "-" + x.event_type + "-" + i}><div><b>{x.event_type} · {x.email}</b><small>{x.source || "—"} · {x.broker_id || "—"}</small></div><span>{x.event_date || x.created_at || "—"}</span></div>)}{!(operations?.events || []).length && <div className="empty-state">No broker events received yet.</div>}</div>
+      </section>}
       {tab === "finance" && canSee("finance") && <section className="role-dashboard finance-dashboard">
         <div className="role-hero"><div><p className="eyebrow">FINANCE · FXPRO</p><h2>Deposits & cash flow</h2><p>Account-level financial performance from the latest FxPro report.</p></div><span>💰</span></div>
         <div className="exec-kpis">
@@ -408,6 +425,7 @@ function App() {
         {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
         {canSee("finance") && <NavButton id="finance">Finance</NavButton>}
         {canSee("traffic") && <NavButton id="traffic">Traffic</NavButton>}
+        {canSee("operations") && <NavButton id="operations">Operations</NavButton>}
         {effectiveUser.is_admin && <NavButton id="admin">Admin</NavButton>}
       </nav>
     </main>
