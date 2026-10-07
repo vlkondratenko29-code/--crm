@@ -613,6 +613,18 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
         LIMIT 100
     """, (term, term)).fetchall()
 
+    # Chatterfy leads are searchable even before FxPro has a matching account.
+    # This keeps a newly registered/FTD lead visible in CRM instead of returning
+    # "client not found" simply because the broker report does not contain them.
+    chatterfy_rows = conn.execute("""
+        SELECT chat_id, email, click_id, attribution_json
+        FROM chatterfy_leads
+        WHERE lower(coalesce(email,'')) LIKE %s
+           OR lower(coalesce(click_id,'')) LIKE %s
+        ORDER BY chat_id DESC
+        LIMIT 100
+    """, (term, term)).fetchall()
+
     # Pull Chatterfy attribution for the full-report-only accounts in one query.
     account_emails = sorted({(a["email"] or "").strip().lower() for a in account_rows if a["email"]})
     lead_by_email = {}
@@ -678,6 +690,48 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
         if item.get("first_trade_date"):
             item["events"].append({"type":"FT","date":item["first_trade_date"]})
         result.append(item)
+
+    # If a lead exists in Chatterfy but is not present in either FxPro
+    # report, synthesize a lead-only client card. When FxPro appears later,
+    # the same Email will naturally resolve to the broker-backed card above.
+    for lead in chatterfy_rows:
+        email_key = (lead["email"] or "").strip().lower()
+        if not email_key or email_key in seen_emails:
+            continue
+        try:
+            attr = json.loads(lead["attribution_json"]) if lead["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in attr.items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
+        item = {
+            "email": email_key,
+            "broker_id": None,
+            "status": "Chatterfy lead",
+            "country": None,
+            "click_id": lead["click_id"],
+            "registration_date": None,
+            "first_fund_date": None,
+            "first_fund_amount": None,
+            "first_trade_date": None,
+            "last_trade_date": None,
+            "net_deposits": None,
+            "deposits": None,
+            "latest_balance": None,
+            "trading_volume": None,
+            "fxpro_accounts": [],
+            "fxpro_account_count": 0,
+            "attribution": attr,
+            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
+            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+            "adset": attribution_text(attr, "adset_name", "adset_id"),
+            "ad": attribution_text(attr, "ad_id"),
+            "placement": attribution_text(attr, "placement"),
+            "chat_link": attr.get("chatlink"),
+            "events": [],
+        }
+        result.append(item)
+        seen_emails.add(email_key)
 
     # If a client exists only in the full FxPro report, synthesize a client card
     # from all accounts sharing that Email. This handles multiple FxPro logins
