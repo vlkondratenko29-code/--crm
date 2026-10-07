@@ -39,7 +39,7 @@ function App() {
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
   }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
   const canSee = (id) => roleMeta.tabs.includes(id);
-          {buyingRows.map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
+  const buyingRows = useMemo(() => (stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)), [stats.chatterfy?.attribution, buyingCampaign, buyingSource]);
   const buyingTotals = useMemo(() => buyingRows.reduce((a, x) => ({ leads: a.leads + Number(x.leads || 0), reg: a.reg + Number(x.reg || 0), ftd: a.ftd + Number(x.ftd || 0), ft: a.ft + Number(x.ft || 0), deposits: a.deposits + Number(x.deposits || 0) }), { leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 }), [buyingRows]);
 
   React.useEffect(() => {
