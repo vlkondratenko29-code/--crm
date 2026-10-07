@@ -677,7 +677,25 @@ def dashboard(x_telegram_username: str = Header(default="")):
         bucket["ft"] += 1 if r["first_trade_date"] else 0
         bucket["deposits"] += float(r["first_fund_amount"] or 0)
 
+    geo_stats = {}
+    daily_stats = {}
+    for r in rows:
+        geo = (r["country"] or "Unknown").strip() or "Unknown"
+        g = geo_stats.setdefault(geo, {"country": geo, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+        g["leads"] += 1
+        g["reg"] += 1 if r["registration_date"] else 0
+        g["ftd"] += 1 if r["first_fund_date"] else 0
+        g["ft"] += 1 if r["first_trade_date"] else 0
+        g["deposits"] += float(r["first_fund_amount"] or 0)
+        for date_value, key in ((r["registration_date"], "reg"), (r["first_fund_date"], "ftd"), (r["first_trade_date"], "ft")):
+            if date_value:
+                d = daily_stats.setdefault(date_value, {"date": date_value, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+                d[key] += 1
+                if key == "ftd":
+                    d["deposits"] += float(r["first_fund_amount"] or 0)
+
     top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:5]
+    top_geo = sorted(geo_stats.values(), key=lambda x: (x["ftd"], x["deposits"], x["reg"]), reverse=True)[:12]
     top_clicks = sorted(click_stats.values(), key=lambda x: (x["ftd"], x["leads"]), reverse=True)[:8]
     top_attribution = sorted(attribution_stats.values(), key=lambda x: (x["ftd"], x["reg"], x["leads"]), reverse=True)[:12]
     for item in top_clicks:
@@ -700,6 +718,13 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "click_id": r["click_id"],
         })
 
+    try:
+        ops_conn = db()
+        fxpro_accounts_count = ops_conn.execute("SELECT COUNT(*) AS c FROM fxpro_accounts").fetchone()["c"]
+        ops_conn.close()
+    except Exception:
+        fxpro_accounts_count = 0
+
     return {
         "leads": total,
         "reg": reg,
@@ -713,6 +738,23 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "reg_to_ft": round(ft / reg * 100, 1) if reg else 0,
         },
         "top_countries": [{"country": k, "count": v} for k, v in top_countries],
+        "geo": top_geo,
+        "daily": sorted(daily_stats.values(), key=lambda x: x["date"])[-30:],
+        "company": [{
+            "name": "FxPro",
+            "clients": total,
+            "reg": reg,
+            "ftd": ftd,
+            "ft": ft,
+            "deposits": deposits if user["role"] != "seo" else None,
+            "net_deposits": sum(float(r["net_deposits"] or 0) for r in rows) if user["role"] != "seo" else None,
+        }],
+        "operations": {
+            "clients": total,
+            "attributed_clients": len(best_by_email),
+            "unattributed_clients": max(total - len(best_by_email), 0),
+            "fxpro_accounts": fxpro_accounts_count,
+        },
         "chatterfy": {
             "tracker": "Chatterfy",
             "clicks": top_clicks,
