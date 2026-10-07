@@ -187,6 +187,9 @@ def init_db():
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
                 (admin_username, "admin"),
             )
+        # Remove legacy synthetic FxPro events created by older CRM versions.
+        # Chatterfy is the only authoritative source for REG/FTD/FT.
+        conn.execute("DELETE FROM crm_events WHERE source = 'fxpro'")
         conn.commit()
     finally:
         conn.close()
