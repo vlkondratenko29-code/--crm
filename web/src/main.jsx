@@ -172,14 +172,15 @@ function App() {
         </div>
         {previewRole && <div className="preview-note">Preview only — your real Admin access is unchanged.</div>}
         <label className="upload-btn">
-          {importing ? "Uploading..." : "Upload FxPro CSV"}
-          <input type="file" accept=".csv,text/csv" disabled={importing} onChange={async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
+          {importing ? "Uploading..." : "Upload FxPro reports"}
+          <input type="file" accept=".csv,text/csv" multiple disabled={importing} onChange={async (e) => {
+            const files = Array.from(e.target.files || []);
+            if (!files.length) return;
             setImporting(true); setImportMessage("");
             try {
               const base = import.meta.env.VITE_API_URL || "";
-              const form = new FormData(); form.append("file", file);
+              const form = new FormData();
+              files.forEach(file => form.append("files", file));
               const res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
                 method: "POST", body: form,
                 headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
@@ -192,7 +193,7 @@ function App() {
                 throw new Error(responseText.replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 300) || `Import failed (HTTP ${res.status})`);
               }
               if (!res.ok) throw new Error(data.detail || "Import failed");
-              setImportMessage(`Imported ${data.rows} clients`);
+              setImportMessage(`Imported ${data.rows} clients from ${data.files} reports`);
               const dashboard = await fetch(`${base}/api/v1/dashboard`, {
                 headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
               });
