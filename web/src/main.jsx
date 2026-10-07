@@ -139,7 +139,7 @@ function App() {
   return (
     <main className="app">
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -225,7 +225,7 @@ function App() {
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
-        <form className="team-form" onSubmit={saveTeamUser}>
+        <div className="team-form">
           <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="@telegram_username" />
           <select value={newRole} onChange={e => setNewRole(e.target.value)}>
             <option value="handler">Handler</option>
@@ -233,8 +233,8 @@ function App() {
             <option value="head_buying">Head of Buying</option>
             <option value="admin">Admin</option>
           </select>
-          <button className="primary" type="submit" disabled={savingUser}>{savingUser ? "Adding…" : "Add member"}</button>
-        </form>
+          <button className="primary" type="button" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Adding…" : "Add member"}</button>
+        </div>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
         <div className="team-list">
           {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{member.role.replace("_", " ")}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Active" : "Off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
