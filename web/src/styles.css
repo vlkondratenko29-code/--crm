@@ -261,3 +261,32 @@ nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transfo
 .click-row>span:not(.click-id){color:#8492a5}
 .click-row strong{color:#a9e0ae;text-align:right}
 @media(max-width:620px){.funnel{grid-template-columns:1fr 1fr;gap:7px}.funnel i{display:none}.click-row{grid-template-columns:minmax(0,1fr) 30px 60px 52px;font-size:10px}}
+
+
+.buying-summary{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px;position:relative;z-index:1}
+.buying-summary div{padding:11px 10px;background:rgba(7,11,17,.7);border:1px solid #263243;border-radius:12px}
+.buying-summary span{display:block;color:#7f8b9e;font-size:9px;text-transform:uppercase;letter-spacing:.06em}
+.buying-summary b{display:block;margin-top:5px;font-size:16px}
+.attr-header{display:grid;grid-template-columns:1.1fr 1.35fr .75fr;gap:8px;margin:14px 0 6px;padding:0 11px;color:#66758b;font-size:8px;font-weight:800;letter-spacing:.08em}
+.attribution-table{gap:7px}
+.attribution-row{display:grid;grid-template-columns:1.1fr 1.35fr .75fr;gap:8px;align-items:center;padding:11px;background:linear-gradient(145deg,#0b1119,#090e15);border:1px solid #222e3d;border-radius:11px}
+.attr-main,.attr-meta,.attr-stats{min-width:0;display:grid;gap:3px}
+.attr-main b{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attr-main small{color:#a4b1c2;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attr-main em{font-style:normal;color:#65758b;font-size:8px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attr-meta span{color:#8794a7;font-size:9px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attr-stats{text-align:right;justify-items:end}
+.attr-stats b{font-size:11px}
+.attr-stats span{color:#78869a;font-size:8px}
+.attr-stats strong{color:#a9e0ae;font-size:10px}
+.empty-state{padding:13px;background:#0a1018;border:1px dashed #2a3748;border-radius:11px;color:#7f8b9e;font-size:11px}
+.attribution-card{margin-top:14px}
+@media(max-width:620px){
+  .buying-summary{grid-template-columns:1fr 1fr}
+  .buying-summary div:last-child{grid-column:1/-1}
+  .attr-header{display:none}
+  .attribution-row{grid-template-columns:1fr 74px}
+  .attr-meta{grid-column:1/-1;display:flex;gap:7px;overflow:hidden}
+  .attr-meta span{background:#101822;border:1px solid #222e3d;border-radius:7px;padding:4px 6px}
+  .attr-stats{grid-column:2;grid-row:1;align-self:start}
+}
