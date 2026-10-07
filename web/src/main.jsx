@@ -207,9 +207,22 @@ function App() {
       </section>}
 
       {tab === "dashboard" && effectiveUser.role === "admin" && <section className="role-dashboard admin-dashboard">
-        <div className="role-hero"><div><p className="eyebrow">EXECUTIVE</p><h2>CRM overview</h2><p>Full funnel, revenue and team control.</p></div><span>👑</span></div>
-        <div className="mini-metrics"><div><span>Conversion REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>REG → FT</span><b>{stats.funnel?.reg_to_ft ?? 0}%</b></div></div>
-      </section>}
+        <div className="role-hero"><div><p className="eyebrow">EXECUTIVE CONTROL CENTER</p><h2>One place for the whole team</h2><p>Traffic → clients → deposits → performance.</p></div><span>👑</span></div>
+        <div className="exec-kpis">
+          <div><span>LEADS</span><b>{stats.leads}</b></div><div><span>REG</span><b>{stats.reg}</b></div><div><span>FTD</span><b>{stats.ftd}</b></div><div><span>FT</span><b>{stats.ft}</b></div>
+          <div><span>DEPOSITS</span><b>{"$" + Number(stats.deposits || 0).toFixed(2)}</b></div><div><span>NET DEPOSITS</span><b>{"$" + Number(stats.company?.[0]?.net_deposits || 0).toFixed(2)}</b></div>
+        </div>
+        <div className="section-title">Funnel health</div>
+        <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>REG → FT</span><b>{stats.funnel?.reg_to_ft ?? 0}%</b></div></div>
+        <div className="section-title">GEO performance</div>
+        <div className="geo-table">{(stats.geo || []).slice(0,6).map(x => <div className="geo-row" key={x.country}><b>{x.country}</b><span>{x.reg} REG</span><span>{x.ftd} FTD</span><strong>{"$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
+        <div className="section-title">Operations</div>
+        <div className="ops-grid">
+          <div><span>Chatterfy matched</span><b>{stats.operations?.attributed_clients ?? 0}</b></div>
+          <div><span>Need attribution</span><b>{stats.operations?.unattributed_clients ?? 0}</b></div>
+          <div><span>FxPro accounts</span><b>{stats.operations?.fxpro_accounts ?? 0}</b></div>
+        </div>
+      </section>
       {tab === "dashboard" && effectiveUser.role === "head_buying" && <section className="role-dashboard buying-dashboard">
         <div className="role-hero"><div><p className="eyebrow">BUYING · CHATTERFY</p><h2>Buying performance</h2><p>Chatterfy is the attribution tracker · performance by Click ID.</p></div><span>📊</span></div>
         <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
@@ -260,17 +273,20 @@ function App() {
           <button onClick={search}>Search</button>
         </div>
       </section>}
-      {tab === "stats" && canSee("stats") && <section className="card">
-        <p className="eyebrow">ANALYTICS</p>
-        <h2>CRM Statistics</h2>
-        <div className="client-grid">
-          <span>Leads</span><b>{stats.leads}</b>
-          <span>REG</span><b>{stats.reg}</b>
-          <span>FTD</span><b>{stats.ftd}</b>
-          <span>FT</span><b>{stats.ft}</b>
-          <span>Deposits</span><b>{effectiveUser.role === "seo" ? "Hidden" : Number(stats.deposits || 0).toFixed(2)}</b>
+      {tab === "stats" && canSee("stats") && <section className="role-dashboard analytics-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">ANALYTICS HUB</p><h2>Company performance</h2><p>GEO, funnel and traffic in one view.</p></div><span>◈</span></div>
+        <div className="exec-kpis">
+          <div><span>LEADS</span><b>{stats.leads}</b></div><div><span>REG</span><b>{stats.reg}</b></div><div><span>FTD</span><b>{stats.ftd}</b></div><div><span>FT</span><b>{stats.ft}</b></div>
+          <div><span>DEPOSITS</span><b>{effectiveUser.role === "seo" ? "Hidden" : "$" + Number(stats.deposits || 0).toFixed(2)}</b></div>
+          <div><span>AVG FTD</span><b>{effectiveUser.role === "seo" ? "Hidden" : "$" + (stats.ftd ? (Number(stats.deposits || 0)/stats.ftd).toFixed(2) : "0.00")}</b></div>
         </div>
-      </section>}
+        <div className="section-title">GEO performance</div>
+        <div className="geo-table">{(stats.geo || []).map(x => <div className="geo-row" key={x.country}><b>{x.country}</b><span>{x.leads} leads</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><strong>{effectiveUser.role === "seo" ? "Hidden" : "$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
+        <div className="section-title">Traffic performance</div>
+        <div className="traffic-table">{(stats.chatterfy?.attribution || []).map((x,i) => <div className="traffic-row" key={x.click_id+i}><div><b>{x.campaign}</b><small>{x.source}</small></div><span>{x.leads} leads</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><strong>{effectiveUser.role === "seo" ? "—" : "$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
+        <div className="section-title">30-day activity</div>
+        <div className="daily-strip">{(stats.daily || []).slice(-14).map(x => <div key={x.date}><b>{x.ftd}</b><span>FTD</span><small>{x.date.slice(5)}</small></div>)}</div>
+      </section>
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
