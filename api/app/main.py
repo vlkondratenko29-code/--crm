@@ -579,6 +579,57 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     return {"clients": result}
 
 
+@app.get("/api/v1/finance")
+def finance(x_telegram_username: str = Header(default="")):
+    username = x_telegram_username.lstrip("@").strip()
+    user = require_access(username)
+    if user["role"] not in ("admin", "head_buying"):
+        raise HTTPException(status_code=403, detail="Finance access required")
+
+    conn = db()
+    try:
+        accounts = conn.execute("""
+            SELECT country, deposits, withdrawals, latest_balance, usd
+            FROM fxpro_accounts
+        """).fetchall()
+        clients = conn.execute("""
+            SELECT country, first_fund_date, first_fund_amount, net_deposits
+            FROM broker_clients
+        """).fetchall()
+    finally:
+        conn.close()
+
+    account_deposits = sum(float(r["deposits"] or 0) for r in accounts)
+    withdrawals = sum(float(r["withdrawals"] or 0) for r in accounts)
+    balance = sum(float(r["latest_balance"] or 0) for r in accounts)
+    account_net = account_deposits - withdrawals
+
+    ftd_deposits = sum(float(r["first_fund_amount"] or 0) for r in clients if r["first_fund_date"])
+    ftd_count = sum(1 for r in clients if r["first_fund_date"])
+
+    geo = {}
+    for r in accounts:
+        country = (r["country"] or "Unknown").strip() or "Unknown"
+        g = geo.setdefault(country, {"country": country, "deposits": 0.0, "withdrawals": 0.0, "net": 0.0, "balance": 0.0})
+        g["deposits"] += float(r["deposits"] or 0)
+        g["withdrawals"] += float(r["withdrawals"] or 0)
+        g["net"] += float(r["deposits"] or 0) - float(r["withdrawals"] or 0)
+        g["balance"] += float(r["latest_balance"] or 0)
+
+    return {
+        "accounts": len(accounts),
+        "deposits": account_deposits,
+        "withdrawals": withdrawals,
+        "net_deposits": account_net,
+        "balance": balance,
+        "ftd_count": ftd_count,
+        "ftd_deposits": ftd_deposits,
+        "avg_ftd": (ftd_deposits / ftd_count) if ftd_count else 0,
+        "geo": sorted(geo.values(), key=lambda x: x["net"], reverse=True)[:15],
+        "source": "FxPro account report",
+        "note": "Account-level deposits/withdrawals come from FxPro clients reports; FTD metrics come from matched broker clients.",
+    }
+
 @app.get("/api/v1/dashboard")
 def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
