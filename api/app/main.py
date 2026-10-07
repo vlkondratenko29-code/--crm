@@ -530,21 +530,21 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
         file_types = []
         for file in files:
             raw = await file.read()
-            clients = parse_fxpro_report(raw)
-            if clients:
-                for client in clients:
-                    conn.execute(sql, tuple(client.get(k) for k in keys))
-                imported_clients += len(clients)
-                file_types.append("detailed")
-                files_ok += 1
-                continue
-
             accounts = parse_fxpro_clients_report(raw)
             if accounts:
                 for account in accounts:
                     conn.execute(account_sql, tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
                 imported_accounts += len(accounts)
                 file_types.append("clients")
+                files_ok += 1
+                continue
+
+            clients = parse_fxpro_report(raw)
+            if clients:
+                for client in clients:
+                    conn.execute(sql, tuple(client.get(k) for k in keys))
+                imported_clients += len(clients)
+                file_types.append("detailed")
                 files_ok += 1
 
         conn.commit()
@@ -563,14 +563,16 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                     pass
         conn.commit()
         linked_row = conn.execute("""
-            SELECT COUNT(DISTINCT lower(a.email)) AS c
-            FROM fxpro_accounts a
-            WHERE a.email IS NOT NULL
-              AND a.email <> ''
-              AND EXISTS (
-                  SELECT 1 FROM chatterfy_leads l
-                  WHERE lower(l.email) = lower(a.email)
-              )
+            SELECT COUNT(DISTINCT lower(fx.email)) AS c
+            FROM (
+                SELECT email FROM fxpro_accounts WHERE email IS NOT NULL AND email <> ''
+                UNION ALL
+                SELECT email FROM broker_clients WHERE email IS NOT NULL AND email <> ''
+            ) fx
+            WHERE EXISTS (
+                SELECT 1 FROM chatterfy_leads l
+                WHERE lower(l.email) = lower(fx.email)
+            )
         """).fetchone()
         email_linked_clients = int(linked_row["c"] or 0)
         return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"email_linked_clients":email_linked_clients,"file_types":file_types}
