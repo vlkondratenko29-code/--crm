@@ -339,9 +339,16 @@ def clean_attribution_value(value):
     if value is None:
         return None
     value = str(value).strip()
-    if not value or (value.startswith("{{") and value.endswith("}}")):
+    if not value or "{{" in value or "}}" in value:
         return None
     return value
+
+def attribution_text(attr, *keys):
+    for key in keys:
+        value = clean_attribution_value(attr.get(key))
+        if value:
+            return value
+    return None
 
 
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
@@ -548,12 +555,13 @@ def dashboard(x_telegram_username: str = Header(default="")):
     for entry in best_by_email.values():
         r = entry["row"]
         attr = entry["attr"]
-        campaign = attr.get("tracker_campaign") or attr.get("tracker_campaign_name")
-        source = attr.get("tracker_source") or attr.get("tracker_source_name")
-        adset = attr.get("adset_name") or attr.get("adset_id")
-        ad = attr.get("ad_id")
-        placement = attr.get("placement")
-        click = (attr.get("clickid") or r["chatterfy_click_id"] or r["click_id"] or "").strip()
+        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
+        source = attribution_text(attr, "tracker_source_name", "tracker_source")
+        adset = attribution_text(attr, "adset_name", "adset_id")
+        ad = attribution_text(attr, "ad_id")
+        placement = attribution_text(attr, "placement")
+        click = attribution_text(attr, "clickid") or r["chatterfy_click_id"] or r["click_id"] or ""
+        click = str(click).strip()
         # Only put real Chatterfy attribution into Buying analytics.
         if not campaign and not source and not click:
             continue
@@ -615,7 +623,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "tracker": "Chatterfy",
             "clicks": top_clicks,
             "attribution": top_attribution,
-            "matched_clients": len(lead_rows),
+            "matched_clients": len(best_by_email),
         },
         "recent": recent,
     }
