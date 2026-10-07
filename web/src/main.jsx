@@ -193,7 +193,7 @@ function App() {
                 throw new Error(responseText.replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 300) || `Import failed (HTTP ${res.status})`);
               }
               if (!res.ok) throw new Error(data.detail || "Import failed");
-              setImportMessage(`Imported ${data.rows} clients from ${data.files} reports`);
+              setImportMessage(`Imported ${data.client_rows || 0} clients + ${data.account_rows || 0} FxPro accounts from ${data.files} reports`);
               const dashboard = await fetch(`${base}/api/v1/dashboard`, {
                 headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
               });
