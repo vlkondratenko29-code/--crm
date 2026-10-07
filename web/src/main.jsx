@@ -222,7 +222,7 @@ function App() {
           <div><span>Need attribution</span><b>{stats.operations?.unattributed_clients ?? 0}</b></div>
           <div><span>FxPro accounts</span><b>{stats.operations?.fxpro_accounts ?? 0}</b></div>
         </div>
-      </section>
+      </section>}
       {tab === "dashboard" && effectiveUser.role === "head_buying" && <section className="role-dashboard buying-dashboard">
         <div className="role-hero"><div><p className="eyebrow">BUYING · CHATTERFY</p><h2>Buying performance</h2><p>Chatterfy is the attribution tracker · performance by Click ID.</p></div><span>📊</span></div>
         <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
