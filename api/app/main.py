@@ -953,6 +953,34 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     return {"clients": result[:20]}
 
 
+@app.get("/api/v1/clients/debug")
+def debug_client_link(q: str, x_telegram_username: str = Header(default="")):
+    """Admin-only diagnostic for the client -> Chatterfy -> FxPro link."""
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        raw = (q or "").strip()
+        email = raw.lower()
+        if "@" not in email:
+            account = conn.execute("SELECT email FROM fxpro_accounts WHERE lower(trim(login))=%s LIMIT 1", (email,)).fetchone()
+            email = (account["email"] or "").strip().lower() if account else email
+        broker = conn.execute("SELECT * FROM broker_clients WHERE lower(trim(email))=%s", (email,)).fetchall()
+        leads = conn.execute("SELECT chat_id,email,click_id,last_synced_event,attribution_json FROM chatterfy_leads WHERE lower(trim(coalesce(email,'')))=%s ORDER BY chat_id", (email,)).fetchall()
+        accounts = conn.execute("SELECT login,email,name,country,registration_date,deposits,withdrawals,latest_balance,last_trade_date FROM fxpro_accounts WHERE lower(trim(coalesce(email,'')))=%s ORDER BY login", (email,)).fetchall()
+        events = conn.execute("SELECT event_type,event_date,amount,source,broker_id,fxpro_login,chat_id FROM crm_events WHERE lower(trim(coalesce(email,'')))=%s ORDER BY event_date NULLS LAST, created_at", (email,)).fetchall()
+        return {
+            "query": raw,
+            "normalized_email": email,
+            "broker_clients": [dict(r) for r in broker],
+            "chatterfy_leads": [dict(r) for r in leads],
+            "fxpro_accounts": [dict(r) for r in accounts],
+            "crm_events": [dict(r) for r in events],
+            "counts": {"broker_clients": len(broker), "chatterfy_leads": len(leads), "fxpro_accounts": len(accounts), "crm_events": len(events)},
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/traffic")
 def traffic(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
