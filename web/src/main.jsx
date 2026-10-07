@@ -39,6 +39,8 @@ function App() {
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
   }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
   const canSee = (id) => roleMeta.tabs.includes(id);
+          {buyingRows.map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
+  const buyingTotals = useMemo(() => buyingRows.reduce((a, x) => ({ leads: a.leads + Number(x.leads || 0), reg: a.reg + Number(x.reg || 0), ftd: a.ftd + Number(x.ftd || 0), ft: a.ft + Number(x.ft || 0), deposits: a.deposits + Number(x.deposits || 0) }), { leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 }), [buyingRows]);
 
   React.useEffect(() => {
     tg?.ready?.();
@@ -225,18 +227,18 @@ function App() {
       </section>}
       {tab === "dashboard" && effectiveUser.role === "head_buying" && <section className="role-dashboard buying-dashboard">
         <div className="role-hero"><div><p className="eyebrow">BUYING · CHATTERFY</p><h2>Buying performance</h2><p>Chatterfy is the attribution tracker · performance by Click ID.</p></div><span>📊</span></div>
-        <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
-        <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>Avg FTD</span><b>{stats.ftd ? (Number(stats.deposits || 0) / stats.ftd).toFixed(2) : "0.00"}</b></div></div>
+        <div className="funnel"><div><span>LEADS</span><b>{buyingTotals.leads}</b></div><i>→</i><div><span>REG</span><b>{buyingTotals.reg}</b></div><i>→</i><div><span>FTD</span><b>{buyingTotals.ftd}</b></div><i>→</i><div><span>FT</span><b>{buyingTotals.ft}</b></div></div>
+        <div className="mini-metrics"><div><span>REG → FTD</span><b>{buyingTotals.reg ? (buyingTotals.ftd / buyingTotals.reg * 100).toFixed(1) : "0.0"}%</b></div><div><span>FTD → FT</span><b>{buyingTotals.ftd ? (buyingTotals.ft / buyingTotals.ftd * 100).toFixed(1) : "0.0"}%</b></div><div><span>Avg FTD</span><b>{buyingTotals.ftd ? (buyingTotals.deposits / buyingTotals.ftd).toFixed(2) : "0.00"}</b></div></div>
         <div className="buying-filters"><select value={buyingCampaign} onChange={e => setBuyingCampaign(e.target.value)}><option value="all">All campaigns</option>{[...new Set((stats.chatterfy?.attribution || []).map(x => x.campaign).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select><select value={buyingSource} onChange={e => setBuyingSource(e.target.value)}><option value="all">All sources</option>{[...new Set((stats.chatterfy?.attribution || []).map(x => x.source).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select></div>
         <div className="section-title">Chatterfy · Campaign performance</div>
         <div className="buying-summary">
-          <div><span>Matched clients</span><b>{stats.chatterfy?.matched_clients ?? 0}</b></div>
-          <div><span>Attributed FTD</span><b>{(stats.chatterfy?.attribution || []).reduce((n, x) => n + x.ftd, 0)}</b></div>
-          <div><span>Attributed deposits</span><b>${(stats.chatterfy?.attribution || []).reduce((n, x) => n + Number(x.deposits || 0), 0).toFixed(2)}</b></div>
+          <div><span>Attributed leads</span><b>{buyingTotals.leads}</b></div>
+          <div><span>Attributed FTD</span><b>{buyingTotals.ftd}</b></div>
+          <div><span>Attributed deposits</span><b>${buyingTotals.deposits.toFixed(2)}</b></div>
         </div>
         <div className="attr-header"><span>CAMPAIGN / SOURCE</span><span>ADSET · AD · PLACEMENT</span><span>RESULT</span></div>
         <div className="click-table attribution-table">
-          {(stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)).map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
+          {buyingRows.map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
             <div className="attr-main"><b>{x.campaign}</b><small>{x.source}</small><em>{x.click_id}</em></div>
             <div className="attr-meta"><span>{x.adset}</span><span>{x.ad}</span><span>{x.placement}</span></div>
             <div className="attr-stats"><b>{x.leads}</b><span>LEAD</span><strong>{x.ftd} FTD</strong><span>${Number(x.deposits || 0).toFixed(2)}</span></div>
