@@ -193,15 +193,25 @@ function App() {
         {importMessage && <p>{importMessage}</p>}
       </section>}
 
-      {tab === "dashboard" && <section className="stats">
-        {[
-          ["Leads", stats.leads],
-          ["REG", stats.reg],
-          ["FTD", stats.ftd],
-          ["FT", stats.ft],
-          ...(effectiveUser.role === "seo" ? [] : [["Deposits", `${Number(stats.deposits || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]]),
-        ].map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
+      {tab === "dashboard" && effectiveUser.role === "admin" && <section className="role-dashboard admin-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">EXECUTIVE</p><h2>CRM overview</h2><p>Full funnel, revenue and team control.</p></div><span>👑</span></div>
+        <div className="mini-metrics"><div><span>Conversion REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>REG → FT</span><b>{stats.funnel?.reg_to_ft ?? 0}%</b></div></div>
       </section>}
+      {tab === "dashboard" && effectiveUser.role === "head_buying" && <section className="role-dashboard buying-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">BUYING</p><h2>Buying performance</h2><p>Track funnel quality and deposits.</p></div><span>📊</span></div>
+        <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>Avg FTD</span><b>${stats.ftd ? (Number(stats.deposits || 0) / stats.ftd).toFixed(2) : "0.00"}</b></div></div>
+        <div className="section-title">Top countries</div><div className="country-list">{(stats.top_countries || []).map(x => <div key={x.country}><span>{x.country}</span><b>{x.count}</b></div>)}</div>
+      </section>}
+      {tab === "dashboard" && effectiveUser.role === "seo" && <section className="role-dashboard seo-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">SEO</p><h2>Traffic & funnel</h2><p>Lead volume and conversion without financial data.</p></div><span>📈</span></div>
+        <div className="mini-metrics"><div><span>Leads</span><b>{stats.leads}</b></div><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>REG → FT</span><b>{stats.funnel?.reg_to_ft ?? 0}%</b></div></div>
+        <div className="section-title">Top countries</div><div className="country-list">{(stats.top_countries || []).map(x => <div key={x.country}><span>{x.country}</span><b>{x.count}</b></div>)}</div>
+      </section>}
+      {tab === "dashboard" && effectiveUser.role === "handler" && <section className="role-dashboard handler-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">HANDLER</p><h2>Client work</h2><p>Recent registrations ready for processing.</p></div><span>🎧</span></div>
+        <div className="mini-metrics"><div><span>New leads</span><b>{stats.leads}</b></div><div><span>Registered</span><b>{stats.reg}</b></div><div><span>FTD</span><b>{stats.ftd}</b></div></div>
+        <div className="section-title">Recent clients</div><div className="recent-list">{(stats.recent || []).map(x => <div key={x.email}><div><b>{x.email}</b><small>{x.country || "—"} · {x.status || "—"}</small></div><span>{x.registration_date || "—"}</span></div>)}</div>
+      </section>}}
 
       {tab === "dashboard" && <section className="search-card">
         <h2>Find client</h2>
