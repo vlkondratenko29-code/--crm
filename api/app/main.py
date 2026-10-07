@@ -436,10 +436,22 @@ def dashboard(x_telegram_username: str = Header(default="")):
     deposits = sum(float(r["first_fund_amount"] or 0) for r in rows)
 
     countries = {}
+    click_stats = {}
     for r in rows:
         country = (r["country"] or "Unknown").strip() or "Unknown"
         countries[country] = countries.get(country, 0) + 1
+        click_id = (r["click_id"] or "").strip() or "No Click ID"
+        bucket = click_stats.setdefault(click_id, {"click_id": click_id, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+        bucket["leads"] += 1
+        bucket["reg"] += 1 if r["registration_date"] else 0
+        bucket["ftd"] += 1 if r["first_fund_date"] else 0
+        bucket["ft"] += 1 if r["first_trade_date"] else 0
+        bucket["deposits"] += float(r["first_fund_amount"] or 0)
     top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:5]
+    top_clicks = sorted(click_stats.values(), key=lambda x: (x["ftd"], x["leads"]), reverse=True)[:8]
+    for item in top_clicks:
+        item["reg_to_ftd"] = round(item["ftd"] / item["reg"] * 100, 1) if item["reg"] else 0
+        item["ftd_to_ft"] = round(item["ft"] / item["ftd"] * 100, 1) if item["ftd"] else 0
 
     recent = []
     for r in rows[:5]:
@@ -467,6 +479,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "reg_to_ft": round(ft / reg * 100, 1) if reg else 0,
         },
         "top_countries": [{"country": k, "count": v} for k, v in top_countries],
+        "chatterfy": {"tracker": "Chatterfy", "clicks": top_clicks},
         "recent": recent,
     }
 
