@@ -27,7 +27,9 @@ function App() {
   const [newRole, setNewRole] = useState("handler");
   const [teamMessage, setTeamMessage] = useState("");
   const [savingUser, setSavingUser] = useState(false);
-  const effectiveUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
+  const [previewRole, setPreviewRole] = useState("");
+  const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
+  const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
     admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "admin"] },
     head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats"] },
@@ -159,6 +161,14 @@ function App() {
         <p className="eyebrow">ADMIN ACCESS</p>
         <h2>Full CRM access enabled</h2>
         <p>{roleMeta.title} · Clients · Analytics · Team · Settings</p>
+        <div className="role-preview">
+          <span>Preview role</span>
+          <button className={!previewRole ? "selected" : ""} onClick={() => setPreviewRole("")}>Admin</button>
+          <button className={previewRole === "head_buying" ? "selected" : ""} onClick={() => setPreviewRole("head_buying")}>Head of Buying</button>
+          <button className={previewRole === "seo" ? "selected" : ""} onClick={() => setPreviewRole("seo")}>SEO</button>
+          <button className={previewRole === "handler" ? "selected" : ""} onClick={() => setPreviewRole("handler")}>Handler</button>
+        </div>
+        {previewRole && <div className="preview-note">Preview only — your real Admin access is unchanged.</div>}
         <label className="upload-btn">
           {importing ? "Uploading..." : "Upload FxPro CSV"}
           <input type="file" accept=".csv,text/csv" disabled={importing} onChange={async (e) => {
