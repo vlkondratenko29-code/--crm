@@ -643,7 +643,8 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                     for account in accounts
                 ]
                 if account_values:
-                    conn.executemany(account_sql, account_values)
+                    with conn.cursor() as cur:
+                        cur.executemany(account_sql, account_values)
                 imported_accounts += len(accounts)
                 imported_accounts_with_email += sum(1 for account in accounts if account.get("email"))
                 file_types.append("clients")
@@ -654,7 +655,8 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             if clients:
                 client_values = [tuple(client.get(k) for k in keys) for client in clients]
                 if client_values:
-                    conn.executemany(sql, client_values)
+                    with conn.cursor() as cur:
+                        cur.executemany(sql, client_values)
                 imported_clients += len(clients)
                 file_types.append("detailed")
                 files_ok += 1
