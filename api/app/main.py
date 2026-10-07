@@ -402,7 +402,7 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
 @app.get("/api/v1/clients/search")
 def search_clients(q: str, x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
-    require_access(username)
+    user = require_access(username)
     conn = db()
     term = "%" + q.strip().lower() + "%"
     rows = conn.execute("SELECT * FROM broker_clients WHERE lower(email) LIKE %s OR lower(coalesce(click_id,'')) LIKE %s LIMIT 20", (term, term)).fetchall()
@@ -410,6 +410,9 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     result = []
     for row in rows:
         item = dict(row)
+        if user["role"] == "seo":
+            for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
+                item[key] = None
         item["events"] = []
         if item["registration_date"]: item["events"].append({"type":"REG","date":item["registration_date"]})
         if item["first_fund_date"]: item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item["first_fund_amount"]})
