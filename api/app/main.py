@@ -295,6 +295,13 @@ def parse_fxpro_clients_report(raw: bytes):
         email = (value(row, "Email", "Email Address", "EmailAddress", "email") or "").strip().lower()
         if email and "@" not in email:
             email = ""
+        deposits = to_float(value(row, "Депозиты", "Deposits"))
+        withdrawals = to_float(value(row, "Выводы", "Withdrawals"))
+        # FxPro exports withdrawals as signed negative amounts in some reports.
+        # Store them as positive outflows so Finance can consistently calculate
+        # Net Deposits = Deposits - Withdrawals.
+        if withdrawals is not None and withdrawals < 0:
+            withdrawals = abs(withdrawals)
         accounts.append({
             "login": login,
             "email": email or None,
@@ -306,8 +313,8 @@ def parse_fxpro_clients_report(raw: bytes):
             "active": value(row, "Активен", "Active"),
             "currency": value(row, "Валюта", "Currency"),
             "usd": to_float(value(row, "USD")),
-            "deposits": to_float(value(row, "Депозиты", "Deposits")),
-            "withdrawals": to_float(value(row, "Выводы", "Withdrawals")),
+            "deposits": deposits,
+            "withdrawals": withdrawals,
             "latest_balance": to_float(value(row, "Баланс в реальном времени", "Real-time Balance", "Latest Balance")),
             "last_trade_date": parse_date(value(row, "Последняя сделка", "Last Trade", "Last Trade Date")),
         })
