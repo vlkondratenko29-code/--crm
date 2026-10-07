@@ -151,16 +151,13 @@ def init_db():
                 last_trade_date TEXT
             )
         """)
-        try:
-            conn.execute("ALTER TABLE fxpro_accounts ADD COLUMN IF NOT EXISTS email TEXT")
-        except Exception:
-            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chatterfy_leads (
                 chat_id TEXT PRIMARY KEY,
                 email TEXT,
                 click_id TEXT,
-                last_synced_event TEXT
+                last_synced_event TEXT,
+                attribution_json TEXT
             )
         """)
         conn.execute("""
@@ -185,10 +182,6 @@ def init_db():
                 created_at TEXT
             )
         """)
-        try:
-            conn.execute("ALTER TABLE chatterfy_leads ADD COLUMN IF NOT EXISTS attribution_json TEXT")
-        except Exception:
-            pass
         for admin_username in ("jokwq", "nodari777"):
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
