@@ -562,7 +562,18 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                 except Exception:
                     pass
         conn.commit()
-        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"file_types":file_types}
+        linked_row = conn.execute("""
+            SELECT COUNT(DISTINCT lower(a.email)) AS c
+            FROM fxpro_accounts a
+            WHERE a.email IS NOT NULL
+              AND a.email <> ''
+              AND EXISTS (
+                  SELECT 1 FROM chatterfy_leads l
+                  WHERE lower(l.email) = lower(a.email)
+              )
+        """).fetchone()
+        email_linked_clients = int(linked_row["c"] or 0)
+        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"email_linked_clients":email_linked_clients,"file_types":file_types}
     except Exception as exc:
         if conn is not None:
             try:
