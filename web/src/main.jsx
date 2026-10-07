@@ -211,7 +211,7 @@ function App() {
         <div className="role-hero"><div><p className="eyebrow">HANDLER</p><h2>Client work</h2><p>Recent registrations ready for processing.</p></div><span>🎧</span></div>
         <div className="mini-metrics"><div><span>New leads</span><b>{stats.leads}</b></div><div><span>Registered</span><b>{stats.reg}</b></div><div><span>FTD</span><b>{stats.ftd}</b></div></div>
         <div className="section-title">Recent clients</div><div className="recent-list">{(stats.recent || []).map(x => <div key={x.email}><div><b>{x.email}</b><small>{x.country || "—"} · {x.status || "—"}</small></div><span>{x.registration_date || "—"}</span></div>)}</div>
-      </section>}}
+      </section>}
 
       {tab === "dashboard" && <section className="search-card">
         <h2>Find client</h2>
