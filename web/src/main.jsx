@@ -144,7 +144,7 @@ function App() {
   }
 
   return (
-    <main className="app">
+    <main className={"app role-" + effectiveUser.role}>
       <header>
         <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
@@ -199,7 +199,7 @@ function App() {
           ["REG", stats.reg],
           ["FTD", stats.ftd],
           ["FT", stats.ft],
-          ["Deposits", `${Number(stats.deposits || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
+          ...(effectiveUser.role === "seo" ? [] : [["Deposits", `${Number(stats.deposits || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`]]),
         ].map(([label, value]) => <article className="stat" key={label}><span>{label}</span><strong>{value}</strong></article>)}
       </section>}
 
@@ -226,7 +226,7 @@ function App() {
           <span>REG</span><b>{stats.reg}</b>
           <span>FTD</span><b>{stats.ftd}</b>
           <span>FT</span><b>{stats.ft}</b>
-          <span>Deposits</span><b>{Number(stats.deposits || 0).toFixed(2)}</b>
+          <span>Deposits</span><b>{effectiveUser.role === "seo" ? "Hidden" : Number(stats.deposits || 0).toFixed(2)}</b>
         </div>
       </section>}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
