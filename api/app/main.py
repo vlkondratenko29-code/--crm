@@ -435,11 +435,28 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     user = require_access(username)
     conn = db()
     term = "%" + q.strip().lower() + "%"
-    rows = conn.execute("SELECT * FROM broker_clients WHERE lower(email) LIKE %s OR lower(coalesce(click_id,'')) LIKE %s LIMIT 20", (term, term)).fetchall()
+    rows = conn.execute("""
+        SELECT b.*, l.attribution_json AS chatterfy_attribution_json, l.click_id AS chatterfy_click_id
+        FROM broker_clients b
+        LEFT JOIN chatterfy_leads l ON lower(l.email) = lower(b.email)
+        WHERE lower(b.email) LIKE %s
+           OR lower(coalesce(b.click_id,'')) LIKE %s
+           OR lower(coalesce(l.click_id,'')) LIKE %s
+        LIMIT 20
+    """, (term, term, term)).fetchall()
     conn.close()
+    import json
     result = []
     for row in rows:
         item = dict(row)
+        raw_attr = item.pop("chatterfy_attribution_json", None)
+        chatterfy_click_id = item.pop("chatterfy_click_id", None)
+        try:
+            item["attribution"] = json.loads(raw_attr) if raw_attr else {}
+        except Exception:
+            item["attribution"] = {}
+        if chatterfy_click_id and not item.get("click_id"):
+            item["click_id"] = chatterfy_click_id
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
@@ -467,6 +484,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
 
     countries = {}
     click_stats = {}
+    attribution_stats = {}
     for r in rows:
         country = (r["country"] or "Unknown").strip() or "Unknown"
         countries[country] = countries.get(country, 0) + 1
@@ -477,9 +495,52 @@ def dashboard(x_telegram_username: str = Header(default="")):
         bucket["ftd"] += 1 if r["first_fund_date"] else 0
         bucket["ft"] += 1 if r["first_trade_date"] else 0
         bucket["deposits"] += float(r["first_fund_amount"] or 0)
+
+    # Chatterfy is the attribution source. Join its latest stored attribution
+    # to broker clients by email so Buying can see Campaign → Source → AdSet → Ad.
+    lead_rows = None
+    attr_conn = db()
+    try:
+        lead_rows = attr_conn.execute("""
+            SELECT b.email, b.click_id, b.registration_date, b.first_fund_date, b.first_trade_date,
+                   b.first_fund_amount, l.click_id AS chatterfy_click_id, l.attribution_json
+            FROM broker_clients b
+            LEFT JOIN chatterfy_leads l ON lower(l.email) = lower(b.email)
+        """).fetchall()
+    finally:
+        attr_conn.close()
+
+    import json
+    for r in lead_rows:
+        try:
+            attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        campaign = attr.get("tracker_campaign") or attr.get("tracker_campaign_name") or "Unknown"
+        source = attr.get("tracker_source") or attr.get("tracker_source_name") or "Unknown"
+        adset = attr.get("adset_name") or attr.get("adset_id") or "Unknown"
+        ad = attr.get("ad_id") or "Unknown"
+        placement = attr.get("placement") or "Unknown"
+        click = (r["chatterfy_click_id"] or r["click_id"] or "").strip() or "No Click ID"
+        key = (campaign, source, adset, ad, placement, click)
+        bucket = attribution_stats.setdefault(key, {
+            "campaign": campaign, "source": source, "adset": adset, "ad": ad,
+            "placement": placement, "click_id": click, "leads": 0, "reg": 0,
+            "ftd": 0, "ft": 0, "deposits": 0.0
+        })
+        bucket["leads"] += 1
+        bucket["reg"] += 1 if r["registration_date"] else 0
+        bucket["ftd"] += 1 if r["first_fund_date"] else 0
+        bucket["ft"] += 1 if r["first_trade_date"] else 0
+        bucket["deposits"] += float(r["first_fund_amount"] or 0)
+
     top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:5]
     top_clicks = sorted(click_stats.values(), key=lambda x: (x["ftd"], x["leads"]), reverse=True)[:8]
+    top_attribution = sorted(attribution_stats.values(), key=lambda x: (x["ftd"], x["reg"], x["leads"]), reverse=True)[:12]
     for item in top_clicks:
+        item["reg_to_ftd"] = round(item["ftd"] / item["reg"] * 100, 1) if item["reg"] else 0
+        item["ftd_to_ft"] = round(item["ft"] / item["ftd"] * 100, 1) if item["ftd"] else 0
+    for item in top_attribution:
         item["reg_to_ftd"] = round(item["ftd"] / item["reg"] * 100, 1) if item["reg"] else 0
         item["ftd_to_ft"] = round(item["ft"] / item["ftd"] * 100, 1) if item["ftd"] else 0
 
@@ -509,7 +570,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "reg_to_ft": round(ft / reg * 100, 1) if reg else 0,
         },
         "top_countries": [{"country": k, "count": v} for k, v in top_countries],
-        "chatterfy": {"tracker": "Chatterfy", "clicks": top_clicks},
+        "chatterfy": {"tracker": "Chatterfy", "clicks": top_clicks, "attribution": top_attribution},
         "recent": recent,
     }
 
