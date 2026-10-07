@@ -579,6 +579,76 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     return {"clients": result}
 
 
+@app.get("/api/v1/traffic")
+def traffic(x_telegram_username: str = Header(default="")):
+    username = x_telegram_username.lstrip("@").strip()
+    user = require_access(username)
+    conn = db()
+    try:
+        rows = conn.execute("""
+            SELECT b.email, b.registration_date, b.first_fund_date, b.first_trade_date,
+                   b.first_fund_amount, l.click_id AS chatterfy_click_id, l.attribution_json
+            FROM broker_clients b
+            LEFT JOIN chatterfy_leads l ON lower(l.email) = lower(b.email)
+        """).fetchall()
+    finally:
+        conn.close()
+
+    import json
+    best = {}
+    for r in rows:
+        try:
+            raw = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
+        except Exception:
+            raw = {}
+        attr = {k: clean_attribution_value(v) for k, v in raw.items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
+        if not attr:
+            continue
+        score = sum(1 for k in ("tracker_campaign", "tracker_source", "tracker_campaign_type",
+                                "tracker_provider_type", "tracker_domain_id", "tracker_landing_id",
+                                "click_id", "ad_id", "adset_id", "placement") if attr.get(k))
+        email = (r["email"] or "").strip().lower()
+        if email and (email not in best or score > best[email]["score"]):
+            best[email] = {"row": r, "attr": attr, "score": score}
+
+    grouped = {}
+    for item in best.values():
+        r, attr = item["row"], item["attr"]
+        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign") or "Unknown campaign"
+        source = attribution_text(attr, "tracker_source_name", "tracker_source") or "Unknown source"
+        adset = attribution_text(attr, "adset_name", "adset_id") or "Unknown adset"
+        ad = attribution_text(attr, "ad_id") or "Unknown ad"
+        placement = attribution_text(attr, "placement") or "Unknown placement"
+        click = attribution_text(attr, "clickid") or r["chatterfy_click_id"] or ""
+        click = str(click).strip() or "No Click ID"
+        key = (campaign, source, adset, ad, placement)
+        g = grouped.setdefault(key, {
+            "campaign": campaign, "source": source, "adset": adset, "ad": ad,
+            "placement": placement, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0,
+            "clicks": set()
+        })
+        g["leads"] += 1
+        g["reg"] += 1 if r["registration_date"] else 0
+        g["ftd"] += 1 if r["first_fund_date"] else 0
+        g["ft"] += 1 if r["first_trade_date"] else 0
+        g["deposits"] += float(r["first_fund_amount"] or 0)
+        g["clicks"].add(click)
+
+    result = []
+    for g in grouped.values():
+        g["clicks"] = len(g["clicks"])
+        g["reg_to_ftd"] = round(g["ftd"] / g["reg"] * 100, 1) if g["reg"] else 0
+        g["ftd_to_ft"] = round(g["ft"] / g["ftd"] * 100, 1) if g["ftd"] else 0
+        result.append(g)
+    result.sort(key=lambda x: (x["ftd"], x["deposits"], x["leads"]), reverse=True)
+
+    return {
+        "rows": result,
+        "total": len(result),
+        "viewer": user["role"],
+    }
+
 @app.get("/api/v1/finance")
 def finance(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
