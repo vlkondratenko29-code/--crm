@@ -332,6 +332,9 @@ function App() {
           <span>FTD</span><b>{client.first_fund_date || "—"}</b>
           <span>FT</span><b>{client.first_trade_date || "—"}</b>
           <span>Deposit</span><b>{effectiveUser.role === "handler" || effectiveUser.role === "seo" ? "Hidden" : (client.first_fund_amount != null ? "$" + client.first_fund_amount : "—")}</b>
+          <span>FxPro Login</span><b>{client.fxpro_accounts?.length ? client.fxpro_accounts.map(a => a.login).join(", ") : "—"}</b>
+          <span>FxPro Accounts</span><b>{client.fxpro_account_count || 0}</b>
+          <span>FxPro Balance</span><b>{effectiveUser.role === "handler" || effectiveUser.role === "seo" ? "Hidden" : (client.latest_balance != null ? "$" + Number(client.latest_balance).toFixed(2) : "—")}</b>
         </div>
         {Object.keys(client.attribution || {}).length > 0 && <div className="attribution-card">
           <div className="section-title">Chatterfy attribution</div>
