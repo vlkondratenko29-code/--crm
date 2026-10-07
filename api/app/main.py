@@ -412,7 +412,7 @@ async def chatterfy_webhook(
 
 
 @app.post("/api/v1/broker/fxpro/import")
-async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username: str = Header(default="")):
+async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     if user["role"] != "admin":
@@ -420,16 +420,24 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
 
     conn = None
     try:
-        raw = await file.read()
-        clients = parse_fxpro_report(raw)
         conn = db()
         sql = """INSERT INTO broker_clients
         (email,broker_id,status,country,click_id,registration_date,first_fund_date,first_fund_amount,first_trade_date,last_trade_date,net_deposits,deposits,latest_balance,trading_volume)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
         keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
-        for client in clients:
-            conn.execute(sql, tuple(client.get(k) for k in keys))
+
+        imported_rows = 0
+        files_ok = 0
+        for file in files:
+            raw = await file.read()
+            clients = parse_fxpro_report(raw)
+            for client in clients:
+                conn.execute(sql, tuple(client.get(k) for k in keys))
+            imported_rows += len(clients)
+            if clients:
+                files_ok += 1
+
         conn.commit()
 
         pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
@@ -445,7 +453,7 @@ async def import_fxpro_report(file: UploadFile = File(...), x_telegram_username:
                 except Exception:
                     pass
         conn.commit()
-        return {"status":"ok","broker":"FxPro","rows":len(clients),"chatterfy_synced":synced}
+        return {"status":"ok","broker":"FxPro","files":files_ok,"rows":imported_rows,"chatterfy_synced":synced}
     except Exception as exc:
         if conn is not None:
             try:
