@@ -328,19 +328,24 @@ function App() {
           <span>Click ID</span><b>{client.click_id || "—"}</b>
           <span>Country</span><b>{client.country || "—"}</b>
           <span>Status</span><b>{client.status || "—"}</b>
+          <span>Registration</span><b>{client.registration_date || "—"}</b>
+          <span>FTD</span><b>{client.first_fund_date || "—"}</b>
+          <span>FT</span><b>{client.first_trade_date || "—"}</b>
           <span>Deposit</span><b>{effectiveUser.role === "handler" || effectiveUser.role === "seo" ? "Hidden" : (client.first_fund_amount != null ? "$" + client.first_fund_amount : "—")}</b>
         </div>
         {Object.keys(client.attribution || {}).length > 0 && <div className="attribution-card">
           <div className="section-title">Chatterfy attribution</div>
           <div className="client-grid">
-            <span>Campaign</span><b>{client.attribution.tracker_campaign || client.attribution.tracker_campaign_name || "—"}</b>
-            <span>Source</span><b>{client.attribution.tracker_source || client.attribution.tracker_source_name || "—"}</b>
-            <span>AdSet</span><b>{client.attribution.adset_name || client.attribution.adset_id || "—"}</b>
-            <span>Ad</span><b>{client.attribution.ad_id || "—"}</b>
-            <span>Placement</span><b>{client.attribution.placement || "—"}</b>
+            <span>Campaign</span><b>{client.campaign || client.attribution.tracker_campaign || client.attribution.tracker_campaign_name || "—"}</b>
+            <span>Source</span><b>{client.source || client.attribution.tracker_source || client.attribution.tracker_source_name || "—"}</b>
+            <span>AdSet</span><b>{client.adset || client.attribution.adset_name || client.attribution.adset_id || "—"}</b>
+            <span>Ad</span><b>{client.ad || client.attribution.ad_id || "—"}</b>
+            <span>Placement</span><b>{client.placement || client.attribution.placement || "—"}</b>
             <span>Landing</span><b>{client.attribution.tracker_landing_id || "—"}</b>
           </div>
+          {client.chat_link && <a className="chat-link" href={client.chat_link} target="_blank" rel="noreferrer">Open Chatterfy chat ↗</a>}
         </div>}
+        <div className="section-title">Client Journey</div>
         <div className="timeline">
           {(client.events || []).map((event) => <div key={event.type}><b>{event.type}</b><span>{event.date}{event.amount != null ? " · $" + event.amount : ""}</span></div>)}
         </div>
