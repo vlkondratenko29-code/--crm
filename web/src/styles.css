@@ -71,3 +71,21 @@ nav button.active{background:linear-gradient(135deg,#2b3442,#202733);box-shadow:
 .role-head_buying .userbar{}
 .role-handler .userbar{}
 .role-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1a2230;border:1px solid #2a3546}
+
+.role-dashboard{background:linear-gradient(145deg,#151c27,#10151d);border:1px solid #273242;border-radius:18px;padding:16px;margin-bottom:14px;box-shadow:0 14px 34px rgba(0,0,0,.2)}
+.role-hero{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.role-hero h2{font-size:21px;margin:2px 0 5px}
+.role-hero p:not(.eyebrow){color:#7f8a9b;font-size:12px}
+.role-hero>span{font-size:30px;width:52px;height:52px;display:grid;place-items:center;border-radius:16px;background:#1d2633;border:1px solid #2c3848}
+.mini-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:15px}
+.mini-metrics div{padding:11px 10px;background:#0d131b;border:1px solid #222d3b;border-radius:12px}
+.mini-metrics span{display:block;color:#7f8a9b;font-size:10px}
+.mini-metrics b{display:block;margin-top:5px;font-size:17px}
+.section-title{margin:17px 0 9px;font-size:11px;font-weight:800;letter-spacing:.1em;color:#8d98a8;text-transform:uppercase}
+.country-list,.recent-list{display:grid;gap:7px}
+.country-list div,.recent-list>div{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 11px;background:#0d131b;border:1px solid #222d3b;border-radius:11px;font-size:12px}
+.country-list span,.recent-list small{color:#aab4c2}
+.recent-list>div>div{display:grid;gap:3px;min-width:0}
+.recent-list b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px}
+.recent-list span{color:#7f8a9b;font-size:10px;white-space:nowrap}
+@media(max-width:620px){.mini-metrics{grid-template-columns:1fr 1fr}.mini-metrics div:last-child{grid-column:1/-1}}
