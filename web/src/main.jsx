@@ -15,6 +15,7 @@ function App() {
     return { username, role: admin ? "admin" : "handler", is_admin: admin };
   }, [telegramUser]);
   const [query, setQuery] = useState("");
+  const [roleInfo, setRoleInfo] = useState(null);
   const [client, setClient] = useState(null);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -28,11 +29,22 @@ function App() {
   React.useEffect(() => {
     tg?.ready?.();
     tg?.expand?.();
+    const loadMe = async () => {
+      try {
+        const base = import.meta.env.VITE_API_URL || "";
+        const response = await fetch(base + "/api/v1/me", {
+          headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+        });
+        if (response.ok) setRoleInfo(await response.json());
+      } catch (error) {
+        console.error(error);
+      }
+    };
     const loadDashboard = async () => {
       try {
         const base = import.meta.env.VITE_API_URL || "";
         const response = await fetch(`${base}/api/v1/dashboard`, {
-          headers: { "X-Telegram-Username": user.username || "jokwq" }
+          headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
         });
         if (!response.ok) return;
         const data = await response.json();
@@ -41,14 +53,15 @@ function App() {
         console.error(error);
       }
     };
+    loadMe();
     loadDashboard();
     loadTeam();
   }, [user.username]);
 
   async function loadTeam() {
-    if (!user.is_admin) return;
+    if (!effectiveUser.is_admin) return;
     const base = import.meta.env.VITE_API_URL || "";
-    const res = await fetch(base + "/api/v1/users", { headers: { "X-Telegram-Username": user.username || "jokwq" } });
+    const res = await fetch(base + "/api/v1/users", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } });
     if (res.ok) setTeam((await res.json()).users || []);
   }
 
@@ -57,7 +70,7 @@ function App() {
     const base = import.meta.env.VITE_API_URL || "";
     const res = await fetch(base + "/api/v1/users", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-Telegram-Username": user.username || "jokwq" },
+      headers: { "Content-Type": "application/json", "X-Telegram-Username": effectiveUser.username || "jokwq" },
       body: JSON.stringify({ username: newUser.trim(), role: newRole, active: true })
     });
     if (res.ok) { setNewUser(""); await loadTeam(); }
@@ -67,7 +80,7 @@ function App() {
     const base = import.meta.env.VITE_API_URL || "";
     const res = await fetch(base + "/api/v1/users/" + encodeURIComponent(username), {
       method: "DELETE",
-      headers: { "X-Telegram-Username": user.username || "jokwq" }
+      headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
     });
     if (res.ok) await loadTeam();
   }
@@ -78,7 +91,7 @@ function App() {
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const response = await fetch(`${base}/api/v1/clients/search?q=${encodeURIComponent(query)}`, {
-        headers: { "X-Telegram-Username": user.username || "jokwq" }
+        headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
       });
       if (!response.ok) throw new Error("Search failed");
       const data = await response.json();
@@ -99,15 +112,15 @@ function App() {
     <main className="app">
       <header>
         <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy</p></div>
-        <div className="avatar">{user.username?.[0]?.toUpperCase() || "?"}</div>
+        <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
       <section className="userbar">
-        <span>@{user.username || "telegram-user"}</span>
+        <span>@{effectiveUser.username || "telegram-user"}</span>
         <strong>{user.role === "admin" ? "ADMIN" : "HANDLER"}</strong>
       </section>
 
-      {user.is_admin && <section className="admin-card">
+      {effectiveUser.is_admin && <section className="admin-card">
         <p className="eyebrow">ADMIN ACCESS</p>
         <h2>Full CRM access enabled</h2>
         <p>Clients · Analytics · Team · Settings</p>
@@ -122,7 +135,7 @@ function App() {
               const form = new FormData(); form.append("file", file);
               const res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
                 method: "POST", body: form,
-                headers: { "X-Telegram-Username": user.username || "jokwq" }
+                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
               });
               const responseText = await res.text();
               let data;
@@ -134,7 +147,7 @@ function App() {
               if (!res.ok) throw new Error(data.detail || "Import failed");
               setImportMessage(`Imported ${data.rows} clients`);
               const dashboard = await fetch(`${base}/api/v1/dashboard`, {
-                headers: { "X-Telegram-Username": user.username || "jokwq" }
+                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
               });
               if (dashboard.ok) setStats(await dashboard.json());
             } catch (err) {
@@ -181,7 +194,7 @@ function App() {
           <span>Deposits</span><b>{Number(stats.deposits || 0).toFixed(2)}</b>
         </div>
       </section>}
-      {tab === "admin" && user.is_admin && <section className="card">
+      {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
         <div className="team-form">
@@ -222,7 +235,7 @@ function App() {
         <NavButton id="dashboard">Dashboard</NavButton>
         <NavButton id="clients">Clients</NavButton>
         <NavButton id="stats">Stats</NavButton>
-        <NavButton id="admin">{user.is_admin ? "Admin" : "Profile"}</NavButton>
+        <NavButton id="admin">{effectiveUser.is_admin ? "Admin" : "Profile"}</NavButton>
       </nav>
     </main>
   );
