@@ -201,6 +201,15 @@ function App() {
         <div className="role-hero"><div><p className="eyebrow">BUYING · CHATTERFY</p><h2>Buying performance</h2><p>Chatterfy is the attribution tracker · performance by Click ID.</p></div><span>📊</span></div>
         <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
         <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>Avg FTD</span><b>{stats.ftd ? (Number(stats.deposits || 0) / stats.ftd).toFixed(2) : "0.00"}</b></div></div>
+        <div className="section-title">Chatterfy · Campaign performance</div>
+        <div className="click-table attribution-table">
+          {(stats.chatterfy?.attribution || []).map((x, i) => <div className="click-row attribution-row" key={x.click_id + "-" + i}>
+            <div className="attr-main"><b>{x.campaign}</b><small>{x.source}</small></div>
+            <div className="attr-meta"><span>{x.adset}</span><span>{x.ad}</span><span>{x.placement}</span></div>
+            <div className="attr-stats"><b>{x.leads}</b><span>leads</span><strong>{x.ftd} FTD</strong><span>{x.reg_to_ftd}%</span></div>
+          </div>)}
+          {!(stats.chatterfy?.attribution || []).length && <div className="empty-state">Chatterfy attribution will appear after a matched FxPro client is received.</div>}
+        </div>
         <div className="section-title">Chatterfy · Top Click IDs</div>
         <div className="click-table">{(stats.chatterfy?.clicks || []).map(x => <div className="click-row" key={x.click_id}><span className="click-id">{x.click_id}</span><b>{x.leads}</b><span>{x.reg_to_ftd}% FTD</span><strong>{x.ftd} FTD</strong></div>)}</div>
         <div className="section-title">Top countries</div><div className="country-list">{(stats.top_countries || []).map(x => <div key={x.country}><span>{x.country}</span><b>{x.count}</b></div>)}</div>
@@ -273,6 +282,17 @@ function App() {
           <span>Status</span><b>{client.status || "—"}</b>
           <span>Deposit</span><b>{effectiveUser.role === "handler" || effectiveUser.role === "seo" ? "Hidden" : (client.first_fund_amount != null ? "$" + client.first_fund_amount : "—")}</b>
         </div>
+        {Object.keys(client.attribution || {}).length > 0 && <div className="attribution-card">
+          <div className="section-title">Chatterfy attribution</div>
+          <div className="client-grid">
+            <span>Campaign</span><b>{client.attribution.tracker_campaign || client.attribution.tracker_campaign_name || "—"}</b>
+            <span>Source</span><b>{client.attribution.tracker_source || client.attribution.tracker_source_name || "—"}</b>
+            <span>AdSet</span><b>{client.attribution.adset_name || client.attribution.adset_id || "—"}</b>
+            <span>Ad</span><b>{client.attribution.ad_id || "—"}</b>
+            <span>Placement</span><b>{client.attribution.placement || "—"}</b>
+            <span>Landing</span><b>{client.attribution.tracker_landing_id || "—"}</b>
+          </div>
+        </div>}
         <div className="timeline">
           {(client.events || []).map((event) => <div key={event.type}><b>{event.type}</b><span>{event.date}{event.amount != null ? " · $" + event.amount : ""}</span></div>)}
         </div>
