@@ -335,3 +335,7 @@ nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transfo
  .traffic-row strong{grid-column:2;grid-row:1}
  .geo-row{grid-template-columns:1fr 50px 50px 68px}
 }
+
+.finance-row{display:grid;grid-template-columns:minmax(0,1fr) 78px 78px 78px;gap:7px;align-items:center;padding:11px;background:#0a1018;border:1px solid #222e3d;border-radius:11px;font-size:10px}
+.finance-row b{font-size:11px}.finance-row span{color:#8794a7;text-align:right}.finance-row strong{text-align:right;color:#a9e0ae}.finance-note{margin-top:10px;color:#68768a;font-size:9px}
+@media(max-width:620px){.finance-row{grid-template-columns:1fr 65px 65px 65px;font-size:9px}}
