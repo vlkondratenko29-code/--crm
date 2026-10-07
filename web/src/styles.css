@@ -209,3 +209,43 @@ nav button.active{
 .role-head_buying .role-dashboard{border-color:#3d374f}
 .role-handler .role-dashboard{border-color:#304238}
 .role-admin .role-dashboard{border-color:#3b3b34}
+
+/* Executive polish v2 */
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:32px 32px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.65),transparent 75%)}
+.app{position:relative}
+header{padding-bottom:22px}
+header .eyebrow{color:#9aa9bf}
+.avatar{position:relative}
+.avatar:after{content:"";position:absolute;right:-1px;bottom:0;width:9px;height:9px;border-radius:50%;background:#68d391;border:2px solid #0b0f15}
+.role-dashboard{position:relative;overflow:hidden;min-height:170px}
+.role-dashboard:before{content:"";position:absolute;width:240px;height:240px;right:-100px;top:-120px;border-radius:50%;background:rgba(130,160,220,.08);filter:blur(10px)}
+.role-dashboard:after{content:"";position:absolute;left:0;right:0;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(180,200,230,.28),transparent)}
+.role-hero{position:relative;z-index:1}
+.role-hero h2{font-size:24px;letter-spacing:-.7px}
+.mini-metrics{position:relative;z-index:1}
+.mini-metrics div{background:rgba(7,11,17,.58);backdrop-filter:blur(8px)}
+.section-title{position:relative;z-index:1}
+.country-list,.recent-list{position:relative;z-index:1}
+.search-card{padding:18px}
+.search-card h2{display:flex;align-items:center;gap:8px}
+.search-card h2:before{content:"⌕";font-size:20px;color:#93a9c8}
+.search{margin-top:4px}
+.client-grid{background:rgba(6,10,15,.25);border:1px solid #202b39;border-radius:13px;padding:12px}
+.timeline{position:relative;padding-left:7px}
+.timeline:before{content:"";position:absolute;left:2px;top:4px;bottom:4px;width:1px;background:#2a3748}
+.timeline div{position:relative;padding-left:12px}
+.timeline div:before{content:"";position:absolute;left:-9px;top:14px;width:7px;height:7px;border-radius:50%;background:#829bc1;border:2px solid #111721;box-shadow:0 0 0 1px #34445a}
+.badge{box-shadow:0 0 18px rgba(90,180,110,.08)}
+.admin-card{padding:18px}
+.upload-btn{background:linear-gradient(135deg,#263448,#1a2432);border:1px solid #33445a;transition:.18s}
+.upload-btn:hover{transform:translateY(-1px);border-color:#536a88}
+.team-form{margin-top:16px}
+.team-list{margin-top:16px}
+nav button{position:relative}
+nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transform:translateX(-50%);width:18px;height:2px;border-radius:2px;background:#b9cae3}
+@media(max-width:620px){
+  .app{padding-top:22px}
+  header h1{font-size:30px}
+  .role-dashboard{min-height:0}
+  .role-hero h2{font-size:21px}
+}
