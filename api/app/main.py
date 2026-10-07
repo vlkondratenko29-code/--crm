@@ -741,8 +741,6 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             if current is None:
                 lead_by_email[email_key] = lead
 
-    conn.close()
-
     import json
 
     def events_for_email(email_key):
@@ -924,6 +922,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
                     account[key] = None
         result.append(item)
 
+    conn.close()
     return {"clients": result[:20]}
 
 
