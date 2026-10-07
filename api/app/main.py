@@ -1176,6 +1176,7 @@ def operations(x_telegram_username: str = Header(default="")):
     }
 
 
+# Alerts module
 @app.get("/api/v1/dashboard")
 def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
