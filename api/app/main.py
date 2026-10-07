@@ -54,6 +54,23 @@ def db():
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS fxpro_accounts (
+            login TEXT PRIMARY KEY,
+            name TEXT,
+            country TEXT,
+            jurisdiction TEXT,
+            ib_group TEXT,
+            registration_date TEXT,
+            active TEXT,
+            currency TEXT,
+            usd REAL,
+            deposits REAL,
+            withdrawals REAL,
+            latest_balance REAL,
+            last_trade_date TEXT
+        )
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS chatterfy_leads (
             chat_id TEXT PRIMARY KEY,
             email TEXT,
@@ -226,6 +243,48 @@ def parse_fxpro_report(raw: bytes):
         })
 
     return clients
+
+
+def parse_fxpro_clients_report(raw: bytes):
+    text = raw.decode("utf-8-sig", errors="replace")
+    sample = text[:10000]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\\t|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ";" if sample.count(";") > sample.count(",") else ","
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
+    rows = list(reader)
+
+    def value(row, *names):
+        normalized = {str(k).strip().lower().replace("\ufeff", "").replace('"', ""): v for k, v in row.items() if k is not None}
+        for name in names:
+            v = normalized.get(name.lower())
+            if v not in (None, ""):
+                return v
+        return None
+
+    accounts = []
+    for row in rows:
+        login = str(value(row, "Логин", "Login", "Account", "Account ID") or "").strip()
+        if not login:
+            continue
+        accounts.append({
+            "login": login,
+            "name": value(row, "Имя", "Name"),
+            "country": value(row, "Страна", "Country"),
+            "jurisdiction": value(row, "Юрисдикция", "Jurisdiction"),
+            "ib_group": value(row, "IB группа", "IB Group"),
+            "registration_date": parse_date(value(row, "Дата регистрации", "Registration Date", "RegistrationDate")),
+            "active": value(row, "Активен", "Active"),
+            "currency": value(row, "Валюта", "Currency"),
+            "usd": to_float(value(row, "USD")),
+            "deposits": to_float(value(row, "Депозиты", "Deposits")),
+            "withdrawals": to_float(value(row, "Выводы", "Withdrawals")),
+            "latest_balance": to_float(value(row, "Баланс в реальном времени", "Real-time Balance", "Latest Balance")),
+            "last_trade_date": parse_date(value(row, "Последняя сделка", "Last Trade", "Last Trade Date")),
+        })
+    return accounts
 
 def find_client(email: str | None, click_id: str | None = None):
     conn = db()
@@ -425,17 +484,33 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
         (email,broker_id,status,country,click_id,registration_date,first_fund_date,first_fund_amount,first_trade_date,last_trade_date,net_deposits,deposits,latest_balance,trading_volume)
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
+        account_sql = """INSERT INTO fxpro_accounts
+        (login,name,country,jurisdiction,ib_group,registration_date,active,currency,usd,deposits,withdrawals,latest_balance,last_trade_date)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(login) DO UPDATE SET name=excluded.name,country=excluded.country,jurisdiction=excluded.jurisdiction,ib_group=excluded.ib_group,registration_date=excluded.registration_date,active=excluded.active,currency=excluded.currency,usd=excluded.usd,deposits=excluded.deposits,withdrawals=excluded.withdrawals,latest_balance=excluded.latest_balance,last_trade_date=excluded.last_trade_date"""
         keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
 
-        imported_rows = 0
+        imported_clients = 0
+        imported_accounts = 0
         files_ok = 0
+        file_types = []
         for file in files:
             raw = await file.read()
             clients = parse_fxpro_report(raw)
-            for client in clients:
-                conn.execute(sql, tuple(client.get(k) for k in keys))
-            imported_rows += len(clients)
             if clients:
+                for client in clients:
+                    conn.execute(sql, tuple(client.get(k) for k in keys))
+                imported_clients += len(clients)
+                file_types.append("detailed")
+                files_ok += 1
+                continue
+
+            accounts = parse_fxpro_clients_report(raw)
+            if accounts:
+                for account in accounts:
+                    conn.execute(account_sql, tuple(account.get(k) for k in ("login","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
+                imported_accounts += len(accounts)
+                file_types.append("clients")
                 files_ok += 1
 
         conn.commit()
@@ -453,7 +528,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                 except Exception:
                     pass
         conn.commit()
-        return {"status":"ok","broker":"FxPro","files":files_ok,"rows":imported_rows,"chatterfy_synced":synced}
+        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"file_types":file_types}
     except Exception as exc:
         if conn is not None:
             try:
