@@ -568,6 +568,15 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             item["attribution"] = {}
         if chatterfy_click_id and not item.get("click_id"):
             item["click_id"] = chatterfy_click_id
+        attr = {k: clean_attribution_value(v) for k, v in item["attribution"].items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
+        item["attribution"] = attr
+        item["campaign"] = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
+        item["source"] = attribution_text(attr, "tracker_source_name", "tracker_source")
+        item["adset"] = attribution_text(attr, "adset_name", "adset_id")
+        item["ad"] = attribution_text(attr, "ad_id")
+        item["placement"] = attribution_text(attr, "placement")
+        item["chat_link"] = attr.get("chatlink")
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
