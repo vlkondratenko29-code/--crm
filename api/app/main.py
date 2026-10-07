@@ -335,6 +335,15 @@ def health():
     return {"status": "ok", "service": "broker-crm-api"}
 
 
+def clean_attribution_value(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or (value.startswith("{{") and value.endswith("}}")):
+        return None
+    return value
+
+
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
 async def chatterfy_webhook(
     request: Request,
@@ -371,7 +380,8 @@ async def chatterfy_webhook(
     if not email or not chat_id:
         raise HTTPException(status_code=400, detail="email and chat_id are required")
     import json
-    attribution_json = json.dumps({k:v for k,v in attribution.items() if v not in (None, "")}, ensure_ascii=False)
+    attribution = {k: clean_attribution_value(v) for k, v in attribution.items()}
+    attribution_json = json.dumps({k:v for k,v in attribution.items() if v is not None}, ensure_ascii=False)
     conn = db()
     conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json) VALUES(%s,%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id, attribution_json=excluded.attribution_json", (chat_id, email.strip().lower(), click_id, attribution_json))
     conn.commit()
@@ -570,7 +580,12 @@ def dashboard(x_telegram_username: str = Header(default="")):
             "reg_to_ft": round(ft / reg * 100, 1) if reg else 0,
         },
         "top_countries": [{"country": k, "count": v} for k, v in top_countries],
-        "chatterfy": {"tracker": "Chatterfy", "clicks": top_clicks, "attribution": top_attribution},
+        "chatterfy": {
+            "tracker": "Chatterfy",
+            "clicks": top_clicks,
+            "attribution": top_attribution,
+            "matched_clients": len(lead_rows),
+        },
         "recent": recent,
     }
 
