@@ -77,6 +77,54 @@ def db():
     return conn
 
 app = FastAPI(title="Broker CRM API", version="0.5.0")
+
+def init_db():
+    conn = db()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS broker_clients (
+                email TEXT PRIMARY KEY,
+                broker_id TEXT,
+                status TEXT,
+                country TEXT,
+                click_id TEXT,
+                registration_date TEXT,
+                first_fund_date TEXT,
+                first_fund_amount DOUBLE PRECISION,
+                first_trade_date TEXT,
+                last_trade_date TEXT,
+                net_deposits DOUBLE PRECISION,
+                deposits DOUBLE PRECISION,
+                latest_balance DOUBLE PRECISION,
+                trading_volume DOUBLE PRECISION
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chatterfy_leads (
+                chat_id TEXT PRIMARY KEY,
+                email TEXT,
+                click_id TEXT,
+                last_synced_event TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_users (
+                username TEXT PRIMARY KEY,
+                role TEXT NOT NULL DEFAULT 'handler',
+                active BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        """)
+        for admin_username in ("jokwq", "nodari777"):
+            conn.execute(
+                "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
+                (admin_username, "admin"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+init_db()
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 
