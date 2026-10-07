@@ -58,7 +58,8 @@ def db():
             chat_id TEXT PRIMARY KEY,
             email TEXT,
             click_id TEXT,
-            last_synced_event TEXT
+            last_synced_event TEXT,
+            attribution_json TEXT
         )
     """)
     conn.execute("""
@@ -114,6 +115,10 @@ def init_db():
                 active BOOLEAN NOT NULL DEFAULT TRUE
             )
         """)
+        try:
+            conn.execute("ALTER TABLE chatterfy_leads ADD COLUMN IF NOT EXISTS attribution_json TEXT")
+        except Exception:
+            pass
         for admin_username in ("jokwq", "nodari777"):
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -331,19 +336,44 @@ def health():
 
 
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
-async def chatterfy_webhook(request: Request, email: str | None = None, chat_id: str | None = None, click_id: str | None = None):
+async def chatterfy_webhook(
+    request: Request,
+    email: str | None = None, chat_id: str | None = None, click_id: str | None = None,
+    ad_id: str | None = None, site_source_name: str | None = None, utm_term: str | None = None,
+    tracker_campaign_type: str | None = None, utm_id: str | None = None, utm_medium: str | None = None,
+    utm_source: str | None = None, utm_campaign: str | None = None, campaign_name: str | None = None,
+    ad_campaign_id: str | None = None, adset_id: str | None = None, placement: str | None = None,
+    adset_name: str | None = None, utm_content: str | None = None, tracker_provider_type: str | None = None,
+    tracker_campaign: str | None = None, tracker_source: str | None = None, tracker_domain_id: str | None = None,
+    tracker_landing_id: str | None = None, tracker_source_name: str | None = None,
+    tracker_campaign_name: str | None = None
+):
+    attribution = {
+        "ad_id": ad_id, "site_source_name": site_source_name, "utm_term": utm_term,
+        "tracker_campaign_type": tracker_campaign_type, "utm_id": utm_id, "utm_medium": utm_medium,
+        "utm_source": utm_source, "utm_campaign": utm_campaign, "campaign_name": campaign_name,
+        "ad_campaign_id": ad_campaign_id, "adset_id": adset_id, "placement": placement,
+        "adset_name": adset_name, "utm_content": utm_content, "tracker_provider_type": tracker_provider_type,
+        "tracker_campaign": tracker_campaign, "tracker_source": tracker_source,
+        "tracker_domain_id": tracker_domain_id, "tracker_landing_id": tracker_landing_id,
+        "tracker_source_name": tracker_source_name, "tracker_campaign_name": tracker_campaign_name
+    }
     if request.method == "POST":
         try:
             payload = await request.json()
             email = email or payload.get("email")
             chat_id = chat_id or payload.get("chat_id") or payload.get("chatId")
             click_id = click_id or payload.get("click_id") or payload.get("clickId")
+            for key in attribution:
+                attribution[key] = attribution[key] or payload.get(key)
         except Exception:
             pass
     if not email or not chat_id:
         raise HTTPException(status_code=400, detail="email and chat_id are required")
+    import json
+    attribution_json = json.dumps({k:v for k,v in attribution.items() if v not in (None, "")}, ensure_ascii=False)
     conn = db()
-    conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id) VALUES(%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id", (chat_id, email.strip().lower(), click_id))
+    conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json) VALUES(%s,%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id, attribution_json=excluded.attribution_json", (chat_id, email.strip().lower(), click_id, attribution_json))
     conn.commit()
     conn.close()
     client = find_client(email, click_id)
