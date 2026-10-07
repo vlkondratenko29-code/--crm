@@ -836,6 +836,21 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             """, (email_key,)).fetchall()
             item["fxpro_accounts"] = [dict(a) for a in direct_accounts]
         item["fxpro_account_count"] = len(item["fxpro_accounts"])
+        # Show broker account state on the card without turning account state
+        # into REG/FTD/FT events. Events remain authoritative from Chatterfy.
+        if item["fxpro_accounts"]:
+            accounts = item["fxpro_accounts"]
+            if not item.get("country"):
+                item["country"] = next((a.get("country") for a in accounts if a.get("country")), None)
+            if not item.get("registration_date"):
+                dates = [a.get("registration_date") for a in accounts if a.get("registration_date")]
+                item["registration_date"] = min(dates) if dates else None
+            if item.get("latest_balance") is None:
+                item["latest_balance"] = sum(float(a.get("latest_balance") or 0) for a in accounts)
+            if item.get("deposits") is None:
+                item["deposits"] = sum(float(a.get("deposits") or 0) for a in accounts)
+            if item.get("net_deposits") is None:
+                item["net_deposits"] = sum(float(a.get("deposits") or 0) - float(a.get("withdrawals") or 0) for a in accounts)
         # Expose a flat login list as a reliable UI fallback.
         item["fxpro_logins"] = [str(a.get("login")) for a in item["fxpro_accounts"] if a.get("login")]
         if user["role"] == "seo":
