@@ -37,3 +37,31 @@ nav button.active { background: #242b36; color: #fff; }
 
 .client-grid{display:grid;grid-template-columns:1fr 1.4fr;gap:9px;margin-top:16px;font-size:13px}.client-grid span{color:#8993a3}.client-grid b{text-align:right;word-break:break-all}.admin-card{background:#171d27;border:1px solid #293343;border-radius:16px;padding:15px;margin-bottom:14px}.admin-card p:last-child{color:#8993a3;font-size:13px;margin-top:5px}.userbar{display:flex;justify-content:space-between;align-items:center;background:#10151d;border:1px solid #202733;border-radius:12px;padding:9px 12px;margin-bottom:14px;font-size:12px;color:#aab3c0}.userbar strong{font-size:10px;letter-spacing:.1em}
 .upload-btn{display:inline-flex;align-items:center;margin-top:12px;padding:10px 14px;border-radius:10px;background:#2a3342;color:#fff;font-size:13px;cursor:pointer}.upload-btn input{display:none}
+.subtitle{margin-top:5px;color:#7f8a9b;font-size:12px}
+.app{padding-top:28px}
+header h1{font-size:32px;letter-spacing:-1px}
+.userbar{box-shadow:0 10px 30px rgba(0,0,0,.18)}
+.admin-card{background:linear-gradient(145deg,#182131,#111720);box-shadow:0 14px 36px rgba(0,0,0,.22)}
+.stat{transition:transform .18s ease,border-color .18s ease,background .18s ease}
+.stat:hover{transform:translateY(-2px);border-color:#344154;background:#171e29}
+.search-card,.card{box-shadow:0 12px 30px rgba(0,0,0,.16)}
+.search button,.primary{background:linear-gradient(135deg,#ffffff,#dfe7f2);color:#0b1017!important;font-weight:800;box-shadow:0 8px 18px rgba(0,0,0,.18)}
+.search button:hover,.primary:hover{transform:translateY(-1px)}
+input,select{background:#0d121a;border:1px solid #2b3544;color:#f4f7fb;border-radius:12px;padding:12px;outline:none}
+input:focus,select:focus{border-color:#6f86a8;box-shadow:0 0 0 3px rgba(111,134,168,.13)}
+.team-form{display:grid;grid-template-columns:1.35fr .9fr auto;gap:8px;margin-top:14px}
+.team-form button{border-radius:12px;padding:0 16px;min-height:44px}
+.team-form button:disabled{opacity:.55;cursor:wait}
+.team-message{margin-top:10px;padding:10px 12px;border-radius:11px;background:#0d141d;border:1px solid #273242;color:#b9c4d3;font-size:12px}
+.team-list{display:grid;gap:8px;margin-top:14px}
+.team-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 13px;background:#0f151e;border:1px solid #222c39;border-radius:13px}
+.team-row>div{display:grid;gap:3px}
+.team-row small{text-transform:capitalize;color:#7f8a9b;font-size:11px}
+.status-dot{font-size:11px;color:#8993a3;display:flex;align-items:center;gap:8px}
+.status-dot.on{color:#9ed8a0}
+.status-dot.on:before{content:"";width:7px;height:7px;border-radius:50%;background:#61c46a;box-shadow:0 0 10px rgba(97,196,106,.55)}
+.team-row button{font-size:10px;padding:6px 9px;border-radius:8px;background:#242c38;color:#b7c1ce;margin-left:4px}
+nav{box-shadow:0 12px 35px rgba(0,0,0,.32)}
+nav button{transition:.18s ease}
+nav button.active{background:linear-gradient(135deg,#2b3442,#202733);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+@media (max-width:620px){.team-form{grid-template-columns:1fr 1fr}.team-form .primary{grid-column:1/-1;height:44px}.app{padding-left:13px;padding-right:13px}}
