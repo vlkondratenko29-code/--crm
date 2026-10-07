@@ -202,11 +202,17 @@ function App() {
         <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
         <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>Avg FTD</span><b>{stats.ftd ? (Number(stats.deposits || 0) / stats.ftd).toFixed(2) : "0.00"}</b></div></div>
         <div className="section-title">Chatterfy · Campaign performance</div>
+        <div className="buying-summary">
+          <div><span>Matched clients</span><b>{stats.chatterfy?.matched_clients ?? 0}</b></div>
+          <div><span>Attributed FTD</span><b>{(stats.chatterfy?.attribution || []).reduce((n, x) => n + x.ftd, 0)}</b></div>
+          <div><span>Attributed deposits</span><b>${(stats.chatterfy?.attribution || []).reduce((n, x) => n + Number(x.deposits || 0), 0).toFixed(2)}</b></div>
+        </div>
+        <div className="attr-header"><span>CAMPAIGN / SOURCE</span><span>ADSET · AD · PLACEMENT</span><span>RESULT</span></div>
         <div className="click-table attribution-table">
-          {(stats.chatterfy?.attribution || []).map((x, i) => <div className="click-row attribution-row" key={x.click_id + "-" + i}>
-            <div className="attr-main"><b>{x.campaign}</b><small>{x.source}</small></div>
+          {(stats.chatterfy?.attribution || []).map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
+            <div className="attr-main"><b>{x.campaign}</b><small>{x.source}</small><em>{x.click_id}</em></div>
             <div className="attr-meta"><span>{x.adset}</span><span>{x.ad}</span><span>{x.placement}</span></div>
-            <div className="attr-stats"><b>{x.leads}</b><span>leads</span><strong>{x.ftd} FTD</strong><span>{x.reg_to_ftd}%</span></div>
+            <div className="attr-stats"><b>{x.leads}</b><span>LEAD</span><strong>{x.ftd} FTD</strong><span>${Number(x.deposits || 0).toFixed(2)}</span></div>
           </div>)}
           {!(stats.chatterfy?.attribution || []).length && <div className="empty-state">Chatterfy attribution will appear after a matched FxPro client is received.</div>}
         </div>
