@@ -17,6 +17,8 @@ function App() {
   const [query, setQuery] = useState("");
   const [roleInfo, setRoleInfo] = useState(null);
   const [client, setClient] = useState(null);
+  const [debugInfo, setDebugInfo] = useState(null);
+  const [debugLoading, setDebugLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importMessage, setImportMessage] = useState("");
@@ -153,6 +155,22 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function debugClientLink() {
+    if (!client?.email || !effectiveUser.is_admin) return;
+    setDebugLoading(true);
+    try {
+      const base = import.meta.env.VITE_API_URL || "";
+      const res = await fetch(base + "/api/v1/clients/debug?q=" + encodeURIComponent(client.email), {
+        headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Debug failed");
+      setDebugInfo(data);
+    } catch (error) {
+      setDebugInfo({ error: error.message });
+    } finally { setDebugLoading(false); }
   }
 
   function NavButton({ id, children }) {
@@ -347,6 +365,21 @@ function App() {
             <span>Landing</span><b>{client.attribution.tracker_landing_id || "—"}</b>
           </div>
           {client.chat_link && <a className="chat-link" href={client.chat_link} target="_blank" rel="noreferrer">Open Chatterfy chat ↗</a>}
+        </div>}
+        {effectiveUser.is_admin && <div className="attribution-card">
+          <div className="section-title">Link diagnostic</div>
+          <button className="primary" onClick={debugClientLink} disabled={debugLoading}>{debugLoading ? "Checking…" : "Check DB → API link"}</button>
+          {debugInfo && <div className="client-grid" style={{marginTop: 12}}>
+            {debugInfo.error ? <><span>Error</span><b>{debugInfo.error}</b></> : <>
+              <span>Normalized email</span><b>{debugInfo.normalized_email || "—"}</b>
+              <span>Broker client rows</span><b>{debugInfo.counts?.broker_clients ?? 0}</b>
+              <span>Chatterfy leads</span><b>{debugInfo.counts?.chatterfy_leads ?? 0}</b>
+              <span>FxPro accounts</span><b>{debugInfo.counts?.fxpro_accounts ?? 0}</b>
+              <span>FxPro logins</span><b>{(debugInfo.fxpro_accounts || []).map(x => x.login).join(", ") || "—"}</b>
+              <span>CRM events</span><b>{debugInfo.counts?.crm_events ?? 0}</b>
+              <span>Event types</span><b>{(debugInfo.crm_events || []).map(x => x.event_type + "/" + x.source).join(", ") || "—"}</b>
+            </>}
+          </div>}
         </div>}
         <div className="section-title">Client Journey</div>
         <div className="timeline">
