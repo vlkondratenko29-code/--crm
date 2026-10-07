@@ -691,12 +691,6 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                 SELECT email FROM fxpro_accounts WHERE email IS NOT NULL AND email <> ''
                 UNION ALL
                 SELECT email FROM broker_clients WHERE email IS NOT NULL AND email <> ''
-            ) fx        linked_row = conn.execute("""
-            SELECT COUNT(DISTINCT lower(fx.email)) AS c
-            FROM (
-                SELECT email FROM fxpro_accounts WHERE email IS NOT NULL AND email <> ''
-                UNION ALL
-                SELECT email FROM broker_clients WHERE email IS NOT NULL AND email <> ''
             ) fx
             WHERE EXISTS (
                 SELECT 1 FROM chatterfy_leads l
