@@ -25,7 +25,7 @@ def db():
     if DATABASE_URL:
         if psycopg is None:
             raise RuntimeError("psycopg is required when DATABASE_URL is configured")
-        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=20)
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=20, prepare_threshold=None)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS broker_clients (
                 email TEXT PRIMARY KEY,
