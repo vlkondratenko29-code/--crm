@@ -84,7 +84,7 @@ function App() {
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
+      const timer = setTimeout(() => controller.abort(), 30000);
       const res = await fetch(base + "/api/v1/users", {
         method: "POST",
         signal: controller.signal,
@@ -98,7 +98,7 @@ function App() {
       setTeamMessage("@" + username + " добавлен как " + newRole);
       await loadTeam();
     } catch (error) {
-      setTeamMessage(error.name === "AbortError" ? "CRM не ответила за 8 секунд. Проверь, что Render Live." : error.message);
+      setTeamMessage(error.name === "AbortError" ? "CRM не ответила за 30 секунд. Проверь, что Render и Supabase доступны." : error.message);
     } finally {
       setSavingUser(false);
     }
