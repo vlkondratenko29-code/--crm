@@ -98,7 +98,7 @@ function App() {
   return (
     <main className="app">
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy</p></div>
         <div className="avatar">{user.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -184,7 +184,7 @@ function App() {
       {tab === "admin" && user.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
-        <div className="search">
+        <div className="team-form">
           <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="@telegram_username" />
           <select value={newRole} onChange={e => setNewRole(e.target.value)}>
             <option value="handler">Handler</option>
@@ -192,10 +192,11 @@ function App() {
             <option value="head_buying">Head of Buying</option>
             <option value="admin">Admin</option>
           </select>
-          <button onClick={saveTeamUser}>Add</button>
+          <button className="primary" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Adding…" : "Add member"}</button>
         </div>
-        <div className="timeline">
-          {team.map((member) => <div key={member.username}><b>@{member.username}</b><span>{member.role} · {member.active ? "active" : "off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
+        {teamMessage && <div className="team-message">{teamMessage}</div>}
+        <div className="team-list">
+          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{member.role.replace("_", " ")}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Active" : "Off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
         </div>
       </section>}
       {loading && <section className="card"><p>Searching...</p></section>}
