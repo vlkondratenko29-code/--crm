@@ -65,3 +65,9 @@ nav{box-shadow:0 12px 35px rgba(0,0,0,.32)}
 nav button{transition:.18s ease}
 nav button.active{background:linear-gradient(135deg,#2b3442,#202733);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 @media (max-width:620px){.team-form{grid-template-columns:1fr 1fr}.team-form .primary{grid-column:1/-1;height:44px}.app{padding-left:13px;padding-right:13px}}
+
+.role-admin .userbar{}
+.role-seo .userbar{}
+.role-head_buying .userbar{}
+.role-handler .userbar{}
+.role-pill{display:inline-flex;align-items:center;gap:6px;padding:4px 8px;border-radius:999px;background:#1a2230;border:1px solid #2a3546}
