@@ -1106,6 +1106,76 @@ def finance(x_telegram_username: str = Header(default="")):
         "note": "Account-level deposits/withdrawals come from FxPro clients reports; FTD metrics come from matched broker clients.",
     }
 
+@app.get("/api/v1/operations")
+def operations(x_telegram_username: str = Header(default="")):
+    username = x_telegram_username.lstrip("@").strip()
+    user = require_access(username)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Operations access required")
+
+    conn = db()
+    try:
+        counts = conn.execute("""
+            SELECT
+              (SELECT count(*) FROM chatterfy_leads) AS chatterfy_leads,
+              (SELECT count(DISTINCT lower(trim(email))) FROM chatterfy_leads WHERE email IS NOT NULL AND trim(email) <> '') AS chatterfy_emails,
+              (SELECT count(DISTINCT lower(trim(email))) FROM fxpro_accounts WHERE email IS NOT NULL AND trim(email) <> '') AS fxpro_emails,
+              (SELECT count(DISTINCT lower(trim(l.email)))
+                 FROM chatterfy_leads l
+                 JOIN fxpro_accounts a ON lower(trim(a.email)) = lower(trim(l.email))
+                WHERE l.email IS NOT NULL AND trim(l.email) <> '') AS linked_emails,
+              (SELECT count(*) FROM crm_events) AS events
+        """).fetchone()
+        unmatched = conn.execute("""
+            SELECT l.email, l.chat_id, l.click_id, l.attribution_json
+            FROM chatterfy_leads l
+            LEFT JOIN (
+              SELECT DISTINCT lower(trim(email)) AS email
+              FROM fxpro_accounts
+              WHERE email IS NOT NULL AND trim(email) <> ''
+            ) a ON a.email = lower(trim(l.email))
+            WHERE a.email IS NULL
+            ORDER BY l.chat_id DESC
+            LIMIT 30
+        """).fetchall()
+        events = conn.execute("""
+            SELECT email,event_type,event_date,amount,source,broker_id,fxpro_login,chat_id,created_at
+            FROM crm_events
+            ORDER BY created_at DESC
+            LIMIT 30
+        """).fetchall()
+    finally:
+        conn.close()
+
+    import json
+    pending = []
+    for r in unmatched:
+        try:
+            attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        pending.append({
+            "email": r["email"],
+            "chat_id": r["chat_id"],
+            "click_id": r["click_id"],
+            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
+            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+        })
+    c = dict(counts)
+    return {
+        "counts": {
+            "chatterfy_leads": int(c["chatterfy_leads"] or 0),
+            "chatterfy_emails": int(c["chatterfy_emails"] or 0),
+            "fxpro_emails": int(c["fxpro_emails"] or 0),
+            "linked_emails": int(c["linked_emails"] or 0),
+            "unmatched_emails": max(int(c["chatterfy_emails"] or 0) - int(c["linked_emails"] or 0), 0),
+            "events": int(c["events"] or 0),
+        },
+        "unmatched": pending,
+        "events": [dict(r) for r in events],
+    }
+
+
 @app.get("/api/v1/dashboard")
 def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
