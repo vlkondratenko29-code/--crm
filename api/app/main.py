@@ -848,7 +848,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             "ad": attribution_text(attr, "ad_id"),
             "placement": attribution_text(attr, "placement"),
             "chat_link": attr.get("chatlink"),
-            "events": [],
+            "events": events_for_email(email_key),
         }
         result.append(item)
         seen_emails.add(email_key)
