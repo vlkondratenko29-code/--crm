@@ -77,7 +77,6 @@ function App() {
     };
     loadMe();
     loadDashboard();
-    loadTeam();
   }, [user.username]);
 
   React.useEffect(() => {
