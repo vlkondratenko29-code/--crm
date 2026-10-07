@@ -638,9 +638,12 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             raw = await file.read()
             accounts = parse_fxpro_clients_report(raw)
             if accounts:
-                for account in accounts:
-                    conn.execute(account_sql, tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
-                    record_fxpro_account_events(conn, account)
+                account_values = [
+                    tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date"))
+                    for account in accounts
+                ]
+                if account_values:
+                    conn.executemany(account_sql, account_values)
                 imported_accounts += len(accounts)
                 imported_accounts_with_email += sum(1 for account in accounts if account.get("email"))
                 file_types.append("clients")
@@ -649,9 +652,9 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
 
             clients = parse_fxpro_report(raw)
             if clients:
-                for client in clients:
-                    conn.execute(sql, tuple(client.get(k) for k in keys))
-                    record_fxpro_client_events(conn, client)
+                client_values = [tuple(client.get(k) for k in keys) for client in clients]
+                if client_values:
+                    conn.executemany(sql, client_values)
                 imported_clients += len(clients)
                 file_types.append("detailed")
                 files_ok += 1
