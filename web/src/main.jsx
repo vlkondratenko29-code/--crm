@@ -28,6 +28,8 @@ function App() {
   const [teamMessage, setTeamMessage] = useState("");
   const [savingUser, setSavingUser] = useState(false);
   const [previewRole, setPreviewRole] = useState("");
+  const [buyingCampaign, setBuyingCampaign] = useState("all");
+  const [buyingSource, setBuyingSource] = useState("all");
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
@@ -211,6 +213,7 @@ function App() {
         <div className="role-hero"><div><p className="eyebrow">BUYING · CHATTERFY</p><h2>Buying performance</h2><p>Chatterfy is the attribution tracker · performance by Click ID.</p></div><span>📊</span></div>
         <div className="funnel"><div><span>LEADS</span><b>{stats.leads}</b></div><i>→</i><div><span>REG</span><b>{stats.reg}</b></div><i>→</i><div><span>FTD</span><b>{stats.ftd}</b></div><i>→</i><div><span>FT</span><b>{stats.ft}</b></div></div>
         <div className="mini-metrics"><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>FTD → FT</span><b>{stats.funnel?.ftd_to_ft ?? 0}%</b></div><div><span>Avg FTD</span><b>{stats.ftd ? (Number(stats.deposits || 0) / stats.ftd).toFixed(2) : "0.00"}</b></div></div>
+        <div className="buying-filters"><select value={buyingCampaign} onChange={e => setBuyingCampaign(e.target.value)}><option value="all">All campaigns</option></select><select value={buyingSource} onChange={e => setBuyingSource(e.target.value)}><option value="all">All sources</option></select></div>
         <div className="section-title">Chatterfy · Campaign performance</div>
         <div className="buying-summary">
           <div><span>Matched clients</span><b>{stats.chatterfy?.matched_clients ?? 0}</b></div>
