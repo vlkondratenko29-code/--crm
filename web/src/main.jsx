@@ -72,7 +72,8 @@ function App() {
     if (res.ok) setTeam((await res.json()).users || []);
   }
 
-  async function saveTeamUser() {
+  async function saveTeamUser(event) {
+    event?.preventDefault();
     const username = newUser.trim().replace(/^@+/, "").toLowerCase();
     if (!username) {
       setTeamMessage("Введи Telegram username, например @handler1");
@@ -82,18 +83,22 @@ function App() {
     setTeamMessage("");
     try {
       const base = import.meta.env.VITE_API_URL || "";
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
       const res = await fetch(base + "/api/v1/users", {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json", "X-Telegram-Username": effectiveUser.username || "jokwq" },
         body: JSON.stringify({ username, role: newRole, active: true })
       });
+      clearTimeout(timer);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || "Не удалось добавить пользователя");
+      if (!res.ok) throw new Error(data.detail || ("Ошибка сервера: HTTP " + res.status));
       setNewUser("");
       setTeamMessage("@" + username + " добавлен как " + newRole);
       await loadTeam();
     } catch (error) {
-      setTeamMessage(error.message);
+      setTeamMessage(error.name === "AbortError" ? "CRM не ответила за 8 секунд. Проверь, что Render Live." : error.message);
     } finally {
       setSavingUser(false);
     }
@@ -220,7 +225,7 @@ function App() {
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">TEAM</p>
         <h2>Team access</h2>
-        <div className="team-form">
+        <form className="team-form" onSubmit={saveTeamUser}>
           <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="@telegram_username" />
           <select value={newRole} onChange={e => setNewRole(e.target.value)}>
             <option value="handler">Handler</option>
@@ -228,8 +233,8 @@ function App() {
             <option value="head_buying">Head of Buying</option>
             <option value="admin">Admin</option>
           </select>
-          <button className="primary" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Adding…" : "Add member"}</button>
-        </div>
+          <button className="primary" type="submit" disabled={savingUser}>{savingUser ? "Adding…" : "Add member"}</button>
+        </form>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
         <div className="team-list">
           {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{member.role.replace("_", " ")}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Active" : "Off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
