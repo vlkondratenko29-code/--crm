@@ -819,12 +819,8 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
                 for key in ("deposits", "withdrawals", "latest_balance", "usd"):
                     account[key] = None
         item["events"] = events_for_email((item.get("email") or "").strip().lower())
-        if not item["events"] and item.get("registration_date"):
-            item["events"].append({"type":"REG","date":item["registration_date"],"source":"fxpro"})
-        if item.get("first_fund_date") and not any(e.get("type") == "FTD" for e in item["events"]):
-            item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item.get("first_fund_amount"),"source":"fxpro"})
-        if item.get("first_trade_date") and not any(e.get("type") == "FT" for e in item["events"]):
-            item["events"].append({"type":"FT","date":item["first_trade_date"],"source":"fxpro"})
+        # Event timeline is authoritative from Chatterfy/broker events only.
+        # Do not synthesize REG/FTD/FT from FxPro report fields here.
         result.append(item)
 
     # If a lead exists in Chatterfy but is not present in either FxPro
@@ -929,12 +925,9 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             "chat_link": attr.get("chatlink"),
             "events": events_for_email(email_key),
         }
-        if item["registration_date"] and not any(e.get("type") == "REG" for e in item["events"]):
-            item["events"].append({"type":"REG","date":item["registration_date"],"source":"fxpro"})
-        if item["first_trade_date"] and not any(e.get("type") == "FT" for e in item["events"]):
-            item["events"].append({"type":"FT","date":item["first_trade_date"],"source":"fxpro"})
-        if deposits > 0 and not any(e.get("type") in ("FTD","RD") for e in item["events"]):
-            item["events"].append({"type":"FUNDED","amount":deposits,"source":"fxpro_account_summary"})
+        # Keep event timeline strictly event-driven. The full FxPro account
+        # report contains account state (registration/total deposits/last trade),
+        # not authoritative broker events, so do not manufacture CRM events here.
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
