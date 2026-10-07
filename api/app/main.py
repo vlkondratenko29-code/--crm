@@ -234,18 +234,21 @@ def sync_client_to_chatterfy(chat_id: str, client: dict):
         return {"sent": True, "status_code": response.status}
 
 
-def require_access(username: str):
+def require_access(username: str, conn=None):
     username = username.lstrip("@").strip().lower()
-    conn = db()
+    owns_conn = conn is None
+    if owns_conn:
+        conn = db()
     row = conn.execute("SELECT username, role, active FROM crm_users WHERE lower(username)=%s", (username,)).fetchone()
-    conn.close()
+    if owns_conn:
+        conn.close()
     if not row or not row["active"]:
         raise HTTPException(status_code=403, detail="CRM access is not granted")
     return dict(row)
 
 
-def require_admin(username: str):
-    user = require_access(username)
+def require_admin(username: str, conn=None):
+    user = require_access(username, conn)
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user["username"]
@@ -259,42 +262,48 @@ class TeamUser(BaseModel):
 
 @app.get("/api/v1/users")
 def list_users(x_telegram_username: str = Header(default="")):
-    require_admin(x_telegram_username)
     conn = db()
-    rows = conn.execute("SELECT username, role, active FROM crm_users ORDER BY username").fetchall()
-    conn.close()
-    return {"users": [dict(row) for row in rows]}
+    try:
+        require_admin(x_telegram_username, conn)
+        rows = conn.execute("SELECT username, role, active FROM crm_users ORDER BY username").fetchall()
+        return {"users": [dict(row) for row in rows]}
+    finally:
+        conn.close()
 
 
 @app.post("/api/v1/users")
 def upsert_user(payload: TeamUser, x_telegram_username: str = Header(default="")):
-    require_admin(x_telegram_username)
-    username = payload.username.lstrip("@").strip().lower()
-    if not username:
-        raise HTTPException(status_code=400, detail="Username is required")
-    if payload.role not in {"admin", "head_buying", "seo", "handler"}:
-        raise HTTPException(status_code=400, detail="Invalid role")
     conn = db()
-    conn.execute(
-        "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
-        (username, payload.role, payload.active),
-    )
-    conn.commit()
-    conn.close()
-    return {"status": "ok"}
+    try:
+        require_admin(x_telegram_username, conn)
+        username = payload.username.lstrip("@").strip().lower()
+        if not username:
+            raise HTTPException(status_code=400, detail="Username is required")
+        if payload.role not in {"admin", "head_buying", "seo", "handler"}:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        conn.execute(
+            "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
+            (username, payload.role, payload.active),
+        )
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
 
 
 @app.delete("/api/v1/users/{username}")
 def deactivate_user(username: str, x_telegram_username: str = Header(default="")):
-    require_admin(x_telegram_username)
-    target = username.lstrip("@").strip().lower()
-    if target in {"jokwq", "nodari777"}:
-        raise HTTPException(status_code=400, detail="Primary admins cannot be deactivated")
     conn = db()
-    conn.execute("UPDATE crm_users SET active=FALSE WHERE lower(username)=%s", (target,))
-    conn.commit()
-    conn.close()
-    return {"status": "ok"}
+    try:
+        require_admin(x_telegram_username, conn)
+        target = username.lstrip("@").strip().lower()
+        if target in {"jokwq", "nodari777"}:
+            raise HTTPException(status_code=400, detail="Primary admins cannot be deactivated")
+        conn.execute("UPDATE crm_users SET active=FALSE WHERE lower(username)=%s", (target,))
+        conn.commit()
+        return {"status": "ok"}
+    finally:
+        conn.close()
 
 
 @app.get("/api/v1/me", response_model=UserMe)
