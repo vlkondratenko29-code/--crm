@@ -823,6 +823,8 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             """, (email_key,)).fetchall()
             item["fxpro_accounts"] = [dict(a) for a in direct_accounts]
         item["fxpro_account_count"] = len(item["fxpro_accounts"])
+        # Expose a flat login list as a reliable UI fallback.
+        item["fxpro_logins"] = [str(a.get("login")) for a in item["fxpro_accounts"] if a.get("login")]
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
