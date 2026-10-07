@@ -170,47 +170,58 @@ def to_float(value: str | None):
 
 
 def parse_fxpro_report(raw: bytes):
-    text = raw.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(text))
+    text = raw.decode("utf-8-sig", errors="replace")
+    sample = text[:10000]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\\t|")
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ";" if sample.count(";") > sample.count(",") else ","
+
+    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     rows = list(reader)
+
+    def value(row, *names):
+        normalized = {str(k).strip().lower().replace("\ufeff", ""): v for k, v in row.items() if k is not None}
+        for name in names:
+            v = normalized.get(name.lower())
+            if v not in (None, ""):
+                return v
+        return None
 
     clients = []
     for row in rows:
-        email = (row.get("EmailAddress") or "").strip().lower()
-        if not email:
+        email = (value(row, "EmailAddress", "Email Address", "Email", "email") or "").strip().lower()
+        if not email or "@" not in email:
             continue
 
-        registration = parse_date(row.get("RegistrationDate"))
-        first_fund = parse_date(row.get("First Fund Date"))
-        first_trade = parse_date(row.get("First Trade Date"))
+        registration = parse_date(value(row, "RegistrationDate", "Registration Date", "DateReg"))
+        first_fund = parse_date(value(row, "First Fund Date", "FirstFundDate", "FTD Date"))
+        first_trade = parse_date(value(row, "First Trade Date", "FirstTradeDate", "FT Date"))
 
         events = []
         if registration:
             events.append({"type": "REG", "date": registration})
         if first_fund:
-            events.append({
-                "type": "FTD",
-                "date": first_fund,
-                "amount": to_float(row.get("First External Fund USD")),
-            })
+            events.append({"type": "FTD", "date": first_fund, "amount": to_float(value(row, "First External Fund USD", "First Fund USD", "First Fund Amount"))})
         if first_trade:
             events.append({"type": "FT", "date": first_trade})
 
         clients.append({
             "email": email,
-            "broker_id": row.get("ProfileGUID"),
-            "status": row.get("Status"),
-            "country": row.get("Residential Country"),
-            "click_id": row.get("ClickID") or None,
+            "broker_id": value(row, "ProfileGUID", "Profile GUID", "Broker ID", "BrokerId"),
+            "status": value(row, "Status"),
+            "country": value(row, "Residential Country", "Country"),
+            "click_id": value(row, "ClickID", "Click ID", "ClickId") or None,
             "registration_date": registration,
             "first_fund_date": first_fund,
-            "first_fund_amount": to_float(row.get("First External Fund USD")),
+            "first_fund_amount": to_float(value(row, "First External Fund USD", "First Fund USD", "First Fund Amount")),
             "first_trade_date": first_trade,
-            "last_trade_date": parse_date(row.get("Last Trade Date")),
-            "net_deposits": to_float(row.get("NetDeposits USD (External)")),
-            "deposits": to_float(row.get("Deposits USD (External)")),
-            "latest_balance": to_float(row.get("Latest Balance USD")),
-            "trading_volume": to_float(row.get("Trading Volume USD")),
+            "last_trade_date": parse_date(value(row, "Last Trade Date", "LastTradeDate")),
+            "net_deposits": to_float(value(row, "NetDeposits USD (External)", "Net Deposits USD", "Net Deposits")),
+            "deposits": to_float(value(row, "Deposits USD (External)", "Deposits USD", "Deposits")),
+            "latest_balance": to_float(value(row, "Latest Balance USD", "Latest Balance", "Balance USD")),
+            "trading_volume": to_float(value(row, "Trading Volume USD", "Trading Volume")),
             "events": events,
         })
 
