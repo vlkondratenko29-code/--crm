@@ -211,21 +211,10 @@ function App() {
               const base = import.meta.env.VITE_API_URL || "";
               const form = new FormData();
               files.forEach(file => form.append("files", file));
-              let res;
-              let lastError;
-              for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                  res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
-                    method: "POST", body: form,
-                    headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
-                  });
-                  break;
-                } catch (error) {
-                  lastError = error;
-                  if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 1500));
-                }
-              }
-              if (!res) throw lastError || new Error("Upload connection failed");
+              const res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
+                method: "POST", body: form,
+                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+              });
               const responseText = await res.text();
               let data;
               try {
@@ -235,14 +224,10 @@ function App() {
               }
               if (!res.ok) throw new Error(data.detail || "Import failed");
               setImportMessage(`Imported ${data.client_rows || 0} clients + ${data.account_rows || 0} FxPro accounts · linked by email: ${data.email_linked_clients || 0} clients · ${data.files} reports`);
-              try {
-                const dashboard = await fetch(`${base}/api/v1/dashboard`, {
-                  headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
-                });
-                if (dashboard.ok) setStats(await dashboard.json());
-              } catch (refreshError) {
-                console.warn("Dashboard refresh after import failed; import itself succeeded.", refreshError);
-              }
+              const dashboard = await fetch(`${base}/api/v1/dashboard`, {
+                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+              });
+              if (dashboard.ok) setStats(await dashboard.json());
             } catch (err) {
               setImportMessage(err.message);
             } finally { setImporting(false); e.target.value = ""; }
