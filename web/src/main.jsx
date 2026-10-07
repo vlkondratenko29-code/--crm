@@ -28,6 +28,13 @@ function App() {
   const [teamMessage, setTeamMessage] = useState("");
   const [savingUser, setSavingUser] = useState(false);
   const effectiveUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
+  const roleMeta = {
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "admin"] },
+    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats"] },
+    seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
+    handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
+  }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
+  const canSee = (id) => roleMeta.tabs.includes(id);
 
   React.useEffect(() => {
     tg?.ready?.();
@@ -145,13 +152,13 @@ function App() {
 
       <section className="userbar">
         <span>@{effectiveUser.username || "telegram-user"}</span>
-        <strong>{user.role === "admin" ? "ADMIN" : "HANDLER"}</strong>
+        <strong>{roleMeta.label}</strong>
       </section>
 
       {effectiveUser.is_admin && <section className="admin-card">
         <p className="eyebrow">ADMIN ACCESS</p>
         <h2>Full CRM access enabled</h2>
-        <p>Clients · Analytics · Team · Settings</p>
+        <p>{roleMeta.title} · Clients · Analytics · Team · Settings</p>
         <label className="upload-btn">
           {importing ? "Uploading..." : "Upload FxPro CSV"}
           <input type="file" accept=".csv,text/csv" disabled={importing} onChange={async (e) => {
@@ -211,7 +218,7 @@ function App() {
           <button onClick={search}>Search</button>
         </div>
       </section>}
-      {tab === "stats" && <section className="card">
+      {tab === "stats" && canSee("stats") && <section className="card">
         <p className="eyebrow">ANALYTICS</p>
         <h2>CRM Statistics</h2>
         <div className="client-grid">
@@ -251,7 +258,7 @@ function App() {
           <span>Click ID</span><b>{client.click_id || "—"}</b>
           <span>Country</span><b>{client.country || "—"}</b>
           <span>Status</span><b>{client.status || "—"}</b>
-          <span>Deposit</span><b>{client.first_fund_amount != null ? "$" + client.first_fund_amount : "—"}</b>
+          <span>Deposit</span><b>{effectiveUser.role === "handler" || effectiveUser.role === "seo" ? "Hidden" : (client.first_fund_amount != null ? "$" + client.first_fund_amount : "—")}</b>
         </div>
         <div className="timeline">
           {(client.events || []).map((event) => <div key={event.type}><b>{event.type}</b><span>{event.date}{event.amount != null ? " · $" + event.amount : ""}</span></div>)}
@@ -262,8 +269,8 @@ function App() {
       <nav>
         <NavButton id="dashboard">Dashboard</NavButton>
         <NavButton id="clients">Clients</NavButton>
-        <NavButton id="stats">Stats</NavButton>
-        <NavButton id="admin">{effectiveUser.is_admin ? "Admin" : "Profile"}</NavButton>
+        {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
+        {effectiveUser.is_admin && <NavButton id="admin">Admin</NavButton>}
       </nav>
     </main>
   );
