@@ -314,7 +314,7 @@ def parse_fxpro_clients_report(raw: bytes):
         for k, v in row.items():
             if k is None:
                 continue
-            key = str(k).strip().lower().replace("\\ufeff", "").replace('"', "")
+            key = str(k).strip().lower().replace("\ufeff", "").replace('"', "")
             normalized[key] = v
             normalized[key.replace(" ", "").replace("_", "").replace("-", "")] = v
         for name in names:
@@ -638,6 +638,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
 
         imported_clients = 0
         imported_accounts = 0
+        imported_accounts_with_email = 0
         files_ok = 0
         file_types = []
         for file in files:
@@ -648,6 +649,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
                     conn.execute(account_sql, tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
                     record_fxpro_account_events(conn, account)
                 imported_accounts += len(accounts)
+                imported_accounts_with_email += sum(1 for account in accounts if account.get("email"))
                 file_types.append("clients")
                 files_ok += 1
                 continue
