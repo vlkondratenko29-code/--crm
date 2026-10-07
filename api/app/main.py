@@ -663,36 +663,9 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
 
         conn.commit()
 
-        pending = conn.execute("SELECT chat_id,email,click_id FROM chatterfy_leads").fetchall()
-        synced = 0
-        for lead in pending:
-            client = find_client(lead["email"], lead["click_id"])
-            if not client:
-                # Full FxPro account reports are account-level and therefore do
-                # not create broker_clients rows. Still sync a real REG event to
-                # Chatterfy when the account report proves registration.
-                account = conn.execute("""
-                    SELECT * FROM fxpro_accounts
-                    WHERE lower(coalesce(email,''))=%s
-                    ORDER BY registration_date ASC NULLS LAST
-                    LIMIT 1
-                """, (lead["email"].strip().lower(),)).fetchone()
-                if account and account["registration_date"]:
-                    client = {
-                        "broker_id": None,
-                        "registration_date": account["registration_date"],
-                        "first_fund_date": None,
-                        "first_fund_amount": None,
-                        "first_trade_date": None,
-                    }
-            if client:
-                try:
-                    sync_client_to_chatterfy(lead["chat_id"], client)
-                    event = "FT" if client.get("first_trade_date") else ("FTD" if client.get("first_fund_date") else "REG")
-                    conn.execute("UPDATE chatterfy_leads SET last_synced_event=%s WHERE chat_id=%s", (event, lead["chat_id"]))
-                    synced += 1
-                except Exception:
-                    pass
+        # Chatterfy is the authoritative event source. Do not push inferred
+        # REG/FTD/FT events back into Chatterfy during FxPro imports.
+        conn.execute("DELETE FROM crm_events WHERE source = 'fxpro'")
         conn.commit()
         linked_row = conn.execute("""
             SELECT COUNT(DISTINCT lower(fx.email)) AS c
