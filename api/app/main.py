@@ -521,17 +521,48 @@ def dashboard(x_telegram_username: str = Header(default="")):
         attr_conn.close()
 
     import json
+
+    # Pick the best Chatterfy attribution per FxPro email. Test conversations can
+    # leave multiple webhook rows for the same client; ignore placeholders/empty
+    # attribution and prefer the row with the richest real tracker data.
+    best_by_email = {}
     for r in lead_rows:
         try:
-            attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
+            raw_attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
         except Exception:
-            attr = {}
-        campaign = attr.get("tracker_campaign") or attr.get("tracker_campaign_name") or "Unknown"
-        source = attr.get("tracker_source") or attr.get("tracker_source_name") or "Unknown"
-        adset = attr.get("adset_name") or attr.get("adset_id") or "Unknown"
-        ad = attr.get("ad_id") or "Unknown"
-        placement = attr.get("placement") or "Unknown"
-        click = (r["chatterfy_click_id"] or r["click_id"] or "").strip() or "No Click ID"
+            raw_attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in raw_attr.items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
+        if not attr:
+            continue
+        score = sum(1 for k in (
+            "tracker_campaign", "tracker_source", "tracker_campaign_type",
+            "tracker_provider_type", "tracker_domain_id", "tracker_landing_id",
+            "click_id", "ad_id", "adset_id", "placement"
+        ) if attr.get(k))
+        email_key = (r["email"] or "").strip().lower()
+        current = best_by_email.get(email_key)
+        if current is None or score > current["score"]:
+            best_by_email[email_key] = {"row": r, "attr": attr, "score": score}
+
+    for entry in best_by_email.values():
+        r = entry["row"]
+        attr = entry["attr"]
+        campaign = attr.get("tracker_campaign") or attr.get("tracker_campaign_name")
+        source = attr.get("tracker_source") or attr.get("tracker_source_name")
+        adset = attr.get("adset_name") or attr.get("adset_id")
+        ad = attr.get("ad_id")
+        placement = attr.get("placement")
+        click = (attr.get("clickid") or r["chatterfy_click_id"] or r["click_id"] or "").strip()
+        # Only put real Chatterfy attribution into Buying analytics.
+        if not campaign and not source and not click:
+            continue
+        campaign = campaign or "Unknown campaign"
+        source = source or "Unknown source"
+        adset = adset or "Unknown adset"
+        ad = ad or "Unknown ad"
+        placement = placement or "Unknown placement"
+        click = click or "No Click ID"
         key = (campaign, source, adset, ad, placement, click)
         bucket = attribution_stats.setdefault(key, {
             "campaign": campaign, "source": source, "adset": adset, "ad": ad,
