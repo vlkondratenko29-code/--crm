@@ -87,6 +87,21 @@ def db():
             active INTEGER NOT NULL DEFAULT 1
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crm_events (
+            event_key TEXT PRIMARY KEY,
+            email TEXT,
+            event_type TEXT NOT NULL,
+            event_date TEXT,
+            amount REAL,
+            source TEXT NOT NULL,
+            broker_id TEXT,
+            fxpro_login TEXT,
+            chat_id TEXT,
+            metadata_json TEXT,
+            created_at TEXT
+        )
+    """)
     for admin_username in ("jokwq", "nodari777"):
         conn.execute(
             "INSERT OR IGNORE INTO crm_users(username, role, active) VALUES(?,?,1)",
@@ -153,6 +168,21 @@ def init_db():
                 username TEXT PRIMARY KEY,
                 role TEXT NOT NULL DEFAULT 'handler',
                 active BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crm_events (
+                event_key TEXT PRIMARY KEY,
+                email TEXT,
+                event_type TEXT NOT NULL,
+                event_date TEXT,
+                amount DOUBLE PRECISION,
+                source TEXT NOT NULL,
+                broker_id TEXT,
+                fxpro_login TEXT,
+                chat_id TEXT,
+                metadata_json TEXT,
+                created_at TEXT
             )
         """)
         try:
@@ -320,6 +350,62 @@ def parse_fxpro_clients_report(raw: bytes):
         })
     return accounts
 
+def record_event(conn, *, email, event_type, event_date=None, amount=None, source="unknown",
+                 broker_id=None, fxpro_login=None, chat_id=None, metadata=None):
+    """Persist a deterministic client event without creating duplicates."""
+    if not email or not event_type:
+        return
+    import hashlib, json
+    email_key = email.strip().lower()
+    raw_key = "|".join([
+        email_key, str(event_type).upper(), str(event_date or ""),
+        str(source or ""), str(fxpro_login or ""), str(broker_id or ""),
+        str(chat_id or "")
+    ])
+    event_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+    metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
+    now = datetime.utcnow().isoformat()
+    conn.execute("""
+        INSERT INTO crm_events
+        (event_key,email,event_type,event_date,amount,source,broker_id,fxpro_login,chat_id,metadata_json,created_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(event_key) DO UPDATE SET
+            amount=excluded.amount,
+            metadata_json=excluded.metadata_json
+    """, (
+        event_key, email_key, str(event_type).upper(), event_date, amount,
+        source, broker_id, fxpro_login, chat_id, metadata_json, now
+    ))
+
+def record_fxpro_client_events(conn, client):
+    for event in client.get("events", []):
+        record_event(
+            conn,
+            email=client.get("email"),
+            event_type=event.get("type"),
+            event_date=event.get("date"),
+            amount=event.get("amount"),
+            source="fxpro",
+            broker_id=client.get("broker_id"),
+            metadata={"status": client.get("status"), "click_id": client.get("click_id")}
+        )
+
+def record_fxpro_account_events(conn, account):
+    email = account.get("email")
+    if not email:
+        return
+    if account.get("registration_date"):
+        record_event(
+            conn, email=email, event_type="REG",
+            event_date=account.get("registration_date"),
+            source="fxpro", fxpro_login=account.get("login"),
+            metadata={"account_report": True}
+        )
+    if account.get("last_trade_date"):
+        # The full account report exposes last trade, not the first trade date.
+        # Do not label it FT; that would fabricate an event.
+        pass
+
 def find_client(email: str | None, click_id: str | None = None):
     conn = db()
     row = None
@@ -459,6 +545,8 @@ def attribution_text(attr, *keys):
 async def chatterfy_webhook(
     request: Request,
     email: str | None = None, chat_id: str | None = None, click_id: str | None = None,
+    broker_id: str | None = None, broker_event: str | None = None, deposit_amount: str | None = None,
+    datereg: str | None = None,
     ad_id: str | None = None, site_source_name: str | None = None, utm_term: str | None = None,
     tracker_campaign_type: str | None = None, utm_id: str | None = None, utm_medium: str | None = None,
     utm_source: str | None = None, utm_campaign: str | None = None, campaign_name: str | None = None,
@@ -484,6 +572,10 @@ async def chatterfy_webhook(
             email = email or payload.get("email")
             chat_id = chat_id or payload.get("chat_id") or payload.get("chatId")
             click_id = click_id or payload.get("click_id") or payload.get("clickId")
+            broker_id = broker_id or payload.get("broker_id") or payload.get("brokerId")
+            broker_event = broker_event or payload.get("broker_event") or payload.get("brokerEvent")
+            deposit_amount = deposit_amount or payload.get("deposit_amount") or payload.get("depositAmount")
+            datereg = datereg or payload.get("datereg") or payload.get("dateReg")
             for key in attribution:
                 attribution[key] = attribution[key] or payload.get(key)
         except Exception:
@@ -495,6 +587,13 @@ async def chatterfy_webhook(
     attribution_json = json.dumps({k:v for k,v in attribution.items() if v is not None}, ensure_ascii=False)
     conn = db()
     conn.execute("INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json) VALUES(%s,%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET email=excluded.email, click_id=excluded.click_id, attribution_json=excluded.attribution_json", (chat_id, email.strip().lower(), click_id, attribution_json))
+    if broker_event:
+        amount = to_float(deposit_amount)
+        record_event(
+            conn, email=email, event_type=broker_event, event_date=datereg,
+            amount=amount, source="chatterfy", broker_id=broker_id, chat_id=chat_id,
+            metadata={"click_id": click_id}
+        )
     conn.commit()
     conn.close()
     client = find_client(email, click_id)
@@ -534,6 +633,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             if accounts:
                 for account in accounts:
                     conn.execute(account_sql, tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
+                    record_fxpro_account_events(conn, account)
                 imported_accounts += len(accounts)
                 file_types.append("clients")
                 files_ok += 1
@@ -543,6 +643,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             if clients:
                 for client in clients:
                     conn.execute(sql, tuple(client.get(k) for k in keys))
+                    record_fxpro_client_events(conn, client)
                 imported_clients += len(clients)
                 file_types.append("detailed")
                 files_ok += 1
@@ -644,6 +745,25 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
 
     import json
 
+    def events_for_email(email_key):
+        event_rows = conn.execute("""
+            SELECT event_type, event_date, amount, source, broker_id, fxpro_login, chat_id, metadata_json
+            FROM crm_events
+            WHERE lower(email)=%s
+            ORDER BY event_date ASC NULLS LAST, created_at ASC
+        """, (email_key,)).fetchall()
+        out = []
+        for ev in event_rows:
+            item = dict(ev)
+            try:
+                item["metadata"] = json.loads(item.pop("metadata_json") or "{}")
+            except Exception:
+                item["metadata"] = {}
+            item["type"] = item.pop("event_type")
+            item["date"] = item.pop("event_date")
+            out.append(item)
+        return out
+
     def clean_item(item):
         raw_attr = item.pop("chatterfy_attribution_json", None)
         chatterfy_click_id = item.pop("chatterfy_click_id", None)
@@ -682,13 +802,13 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             for account in item["fxpro_accounts"]:
                 for key in ("deposits", "withdrawals", "latest_balance", "usd"):
                     account[key] = None
-        item["events"] = []
-        if item.get("registration_date"):
-            item["events"].append({"type":"REG","date":item["registration_date"]})
-        if item.get("first_fund_date"):
-            item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item.get("first_fund_amount")})
-        if item.get("first_trade_date"):
-            item["events"].append({"type":"FT","date":item["first_trade_date"]})
+        item["events"] = events_for_email((item.get("email") or "").strip().lower())
+        if not item["events"] and item.get("registration_date"):
+            item["events"].append({"type":"REG","date":item["registration_date"],"source":"fxpro"})
+        if item.get("first_fund_date") and not any(e.get("type") == "FTD" for e in item["events"]):
+            item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item.get("first_fund_amount"),"source":"fxpro"})
+        if item.get("first_trade_date") and not any(e.get("type") == "FT" for e in item["events"]):
+            item["events"].append({"type":"FT","date":item["first_trade_date"],"source":"fxpro"})
         result.append(item)
 
     # If a lead exists in Chatterfy but is not present in either FxPro
@@ -788,14 +908,14 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             "ad": attribution_text(attr, "ad_id"),
             "placement": attribution_text(attr, "placement"),
             "chat_link": attr.get("chatlink"),
-            "events": [],
+            "events": events_for_email(email_key),
         }
-        if item["registration_date"]:
-            item["events"].append({"type":"REG","date":item["registration_date"]})
-        if item["first_trade_date"]:
-            item["events"].append({"type":"FT","date":item["first_trade_date"]})
-        if deposits > 0:
-            item["events"].append({"type":"FUNDED","amount":deposits})
+        if item["registration_date"] and not any(e.get("type") == "REG" for e in item["events"]):
+            item["events"].append({"type":"REG","date":item["registration_date"],"source":"fxpro"})
+        if item["first_trade_date"] and not any(e.get("type") == "FT" for e in item["events"]):
+            item["events"].append({"type":"FT","date":item["first_trade_date"],"source":"fxpro"})
+        if deposits > 0 and not any(e.get("type") in ("FTD","RD") for e in item["events"]):
+            item["events"].append({"type":"FUNDED","amount":deposits,"source":"fxpro_account_summary"})
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
