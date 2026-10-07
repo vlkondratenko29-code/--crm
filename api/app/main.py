@@ -426,24 +426,49 @@ def dashboard(x_telegram_username: str = Header(default="")):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
-    row = conn.execute("""
-        SELECT COUNT(*) AS leads,
-               SUM(CASE WHEN registration_date IS NOT NULL THEN 1 ELSE 0 END) AS reg,
-               SUM(CASE WHEN first_fund_date IS NOT NULL THEN 1 ELSE 0 END) AS ftd,
-               SUM(CASE WHEN first_trade_date IS NOT NULL THEN 1 ELSE 0 END) AS ft,
-               COALESCE(SUM(first_fund_amount), 0) AS deposits
-        FROM broker_clients
-    """).fetchone()
+    rows = conn.execute("SELECT * FROM broker_clients ORDER BY registration_date DESC NULLS LAST").fetchall()
     conn.close()
-    return {
-        "leads": row["leads"] or 0,
-        "reg": row["reg"] or 0,
-        "ftd": row["ftd"] or 0,
-        "ft": row["ft"] or 0,
-        "deposits": row["deposits"] or 0,
-        "viewer": {"username": user["username"], "role": user["role"]},
-    }
 
+    total = len(rows)
+    reg = sum(1 for r in rows if r["registration_date"])
+    ftd = sum(1 for r in rows if r["first_fund_date"])
+    ft = sum(1 for r in rows if r["first_trade_date"])
+    deposits = sum(float(r["first_fund_amount"] or 0) for r in rows)
+
+    countries = {}
+    for r in rows:
+        country = (r["country"] or "Unknown").strip() or "Unknown"
+        countries[country] = countries.get(country, 0) + 1
+    top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    recent = []
+    for r in rows[:5]:
+        recent.append({
+            "email": r["email"],
+            "country": r["country"],
+            "status": r["status"],
+            "registration_date": r["registration_date"],
+            "first_fund_date": r["first_fund_date"],
+            "first_trade_date": r["first_trade_date"],
+            "first_fund_amount": None if user["role"] == "seo" else r["first_fund_amount"],
+            "click_id": r["click_id"],
+        })
+
+    return {
+        "leads": total,
+        "reg": reg,
+        "ftd": ftd,
+        "ft": ft,
+        "deposits": deposits if user["role"] != "seo" else None,
+        "viewer": {"username": user["username"], "role": user["role"]},
+        "funnel": {
+            "reg_to_ftd": round(ftd / reg * 100, 1) if reg else 0,
+            "ftd_to_ft": round(ft / ftd * 100, 1) if ftd else 0,
+            "reg_to_ft": round(ft / reg * 100, 1) if reg else 0,
+        },
+        "top_countries": [{"country": k, "count": v} for k, v in top_countries],
+        "recent": recent,
+    }
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
 # API routes are registered above, so this catch-all only handles frontend assets/pages.
