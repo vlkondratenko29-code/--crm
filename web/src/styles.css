@@ -290,3 +290,10 @@ nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transfo
   .attr-meta span{background:#101822;border:1px solid #222e3d;border-radius:7px;padding:4px 6px}
   .attr-stats{grid-column:2;grid-row:1;align-self:start}
 }
+
+.role-preview{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:13px;padding:10px;background:rgba(7,11,17,.55);border:1px solid #263243;border-radius:12px}
+.role-preview>span{width:100%;font-size:9px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#77869b}
+.role-preview button{padding:7px 9px;border-radius:8px;background:#151e2a;border:1px solid #293748;color:#9eacbf;font-size:10px;font-weight:700}
+.role-preview button:hover{border-color:#42556f;color:#fff}
+.role-preview button.selected{background:#dce6f4;color:#0c121a;border-color:#dce6f4}
+.preview-note{margin-top:7px;color:#7f8da0;font-size:10px}
