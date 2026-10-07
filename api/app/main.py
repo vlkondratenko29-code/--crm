@@ -56,6 +56,7 @@ def db():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS fxpro_accounts (
             login TEXT PRIMARY KEY,
+            email TEXT,
             name TEXT,
             country TEXT,
             jurisdiction TEXT,
@@ -117,6 +118,28 @@ def init_db():
                 trading_volume DOUBLE PRECISION
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS fxpro_accounts (
+                login TEXT PRIMARY KEY,
+                email TEXT,
+                name TEXT,
+                country TEXT,
+                jurisdiction TEXT,
+                ib_group TEXT,
+                registration_date TEXT,
+                active TEXT,
+                currency TEXT,
+                usd DOUBLE PRECISION,
+                deposits DOUBLE PRECISION,
+                withdrawals DOUBLE PRECISION,
+                latest_balance DOUBLE PRECISION,
+                last_trade_date TEXT
+            )
+        """)
+        try:
+            conn.execute("ALTER TABLE fxpro_accounts ADD COLUMN IF NOT EXISTS email TEXT")
+        except Exception:
+            pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chatterfy_leads (
                 chat_id TEXT PRIMARY KEY,
@@ -269,8 +292,12 @@ def parse_fxpro_clients_report(raw: bytes):
         login = str(value(row, "Логин", "Login", "Account", "Account ID") or "").strip()
         if not login:
             continue
+        email = (value(row, "Email", "Email Address", "EmailAddress", "email") or "").strip().lower()
+        if email and "@" not in email:
+            email = ""
         accounts.append({
             "login": login,
+            "email": email or None,
             "name": value(row, "Имя", "Name"),
             "country": value(row, "Страна", "Country"),
             "jurisdiction": value(row, "Юрисдикция", "Jurisdiction"),
@@ -485,9 +512,9 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
         account_sql = """INSERT INTO fxpro_accounts
-        (login,name,country,jurisdiction,ib_group,registration_date,active,currency,usd,deposits,withdrawals,latest_balance,last_trade_date)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT(login) DO UPDATE SET name=excluded.name,country=excluded.country,jurisdiction=excluded.jurisdiction,ib_group=excluded.ib_group,registration_date=excluded.registration_date,active=excluded.active,currency=excluded.currency,usd=excluded.usd,deposits=excluded.deposits,withdrawals=excluded.withdrawals,latest_balance=excluded.latest_balance,last_trade_date=excluded.last_trade_date"""
+        (login,email,name,country,jurisdiction,ib_group,registration_date,active,currency,usd,deposits,withdrawals,latest_balance,last_trade_date)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(login) DO UPDATE SET email=excluded.email,name=excluded.name,country=excluded.country,jurisdiction=excluded.jurisdiction,ib_group=excluded.ib_group,registration_date=excluded.registration_date,active=excluded.active,currency=excluded.currency,usd=excluded.usd,deposits=excluded.deposits,withdrawals=excluded.withdrawals,latest_balance=excluded.latest_balance,last_trade_date=excluded.last_trade_date"""
         keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
 
         imported_clients = 0
@@ -508,7 +535,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             accounts = parse_fxpro_clients_report(raw)
             if accounts:
                 for account in accounts:
-                    conn.execute(account_sql, tuple(account.get(k) for k in ("login","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
+                    conn.execute(account_sql, tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date")))
                 imported_accounts += len(accounts)
                 file_types.append("clients")
                 files_ok += 1
@@ -546,6 +573,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
     user = require_access(username)
     conn = db()
     term = "%" + q.strip().lower() + "%"
+
     rows = conn.execute("""
         SELECT b.*, l.attribution_json AS chatterfy_attribution_json, l.click_id AS chatterfy_click_id
         FROM broker_clients b
@@ -555,37 +583,154 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
            OR lower(coalesce(l.click_id,'')) LIKE %s
         LIMIT 20
     """, (term, term, term)).fetchall()
+
+    account_rows = conn.execute("""
+        SELECT *
+        FROM fxpro_accounts
+        WHERE lower(coalesce(email,'')) LIKE %s
+           OR lower(login) LIKE %s
+        ORDER BY registration_date DESC NULLS LAST
+        LIMIT 100
+    """, (term, term)).fetchall()
+
+    # Pull Chatterfy attribution for the full-report-only accounts in one query.
+    account_emails = sorted({(a["email"] or "").strip().lower() for a in account_rows if a["email"]})
+    lead_by_email = {}
+    if account_emails:
+        placeholders = ",".join(["%s"] * len(account_emails))
+        lead_rows = conn.execute(
+            f"SELECT email, attribution_json, click_id FROM chatterfy_leads WHERE lower(email) IN ({placeholders})",
+            tuple(account_emails),
+        ).fetchall()
+        for lead in lead_rows:
+            email_key = (lead["email"] or "").strip().lower()
+            current = lead_by_email.get(email_key)
+            if current is None:
+                lead_by_email[email_key] = lead
+
     conn.close()
+
     import json
-    result = []
-    for row in rows:
-        item = dict(row)
+
+    def clean_item(item):
         raw_attr = item.pop("chatterfy_attribution_json", None)
         chatterfy_click_id = item.pop("chatterfy_click_id", None)
         try:
-            item["attribution"] = json.loads(raw_attr) if raw_attr else {}
+            attr = json.loads(raw_attr) if raw_attr else {}
         except Exception:
-            item["attribution"] = {}
-        if chatterfy_click_id and not item.get("click_id"):
-            item["click_id"] = chatterfy_click_id
-        attr = {k: clean_attribution_value(v) for k, v in item["attribution"].items()}
+            attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in attr.items()}
         attr = {k: v for k, v in attr.items() if v is not None}
         item["attribution"] = attr
+        if chatterfy_click_id and not item.get("click_id"):
+            item["click_id"] = chatterfy_click_id
         item["campaign"] = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
         item["source"] = attribution_text(attr, "tracker_source_name", "tracker_source")
         item["adset"] = attribution_text(attr, "adset_name", "adset_id")
         item["ad"] = attribution_text(attr, "ad_id")
         item["placement"] = attribution_text(attr, "placement")
         item["chat_link"] = attr.get("chatlink")
+        return item
+
+    result = []
+    seen_emails = set()
+
+    for row in rows:
+        item = clean_item(dict(row))
+        email_key = (item.get("email") or "").strip().lower()
+        seen_emails.add(email_key)
+        item["fxpro_accounts"] = [
+            dict(a) for a in account_rows
+            if (a["email"] or "").strip().lower() == email_key
+        ]
+        item["fxpro_account_count"] = len(item["fxpro_accounts"])
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
                 item[key] = None
+            for account in item["fxpro_accounts"]:
+                for key in ("deposits", "withdrawals", "latest_balance", "usd"):
+                    account[key] = None
         item["events"] = []
-        if item["registration_date"]: item["events"].append({"type":"REG","date":item["registration_date"]})
-        if item["first_fund_date"]: item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item["first_fund_amount"]})
-        if item["first_trade_date"]: item["events"].append({"type":"FT","date":item["first_trade_date"]})
+        if item.get("registration_date"):
+            item["events"].append({"type":"REG","date":item["registration_date"]})
+        if item.get("first_fund_date"):
+            item["events"].append({"type":"FTD","date":item["first_fund_date"],"amount":item.get("first_fund_amount")})
+        if item.get("first_trade_date"):
+            item["events"].append({"type":"FT","date":item["first_trade_date"]})
         result.append(item)
-    return {"clients": result}
+
+    # If a client exists only in the full FxPro report, synthesize a client card
+    # from all accounts sharing that Email. This handles multiple FxPro logins
+    # without overwriting or double-counting the accounts.
+    grouped = {}
+    for account in account_rows:
+        email_key = (account["email"] or "").strip().lower()
+        if email_key and email_key not in seen_emails:
+            grouped.setdefault(email_key, []).append(dict(account))
+
+    for email_key, accounts in grouped.items():
+        reg_dates = [a["registration_date"] for a in accounts if a["registration_date"]]
+        trade_dates = [a["last_trade_date"] for a in accounts if a["last_trade_date"]]
+        deposits = sum(float(a["deposits"] or 0) for a in accounts)
+        withdrawals = sum(float(a["withdrawals"] or 0) for a in accounts)
+        balance = sum(float(a["latest_balance"] or 0) for a in accounts)
+        lead = lead_by_email.get(email_key)
+        attr = {}
+        click_id = None
+        if lead:
+            try:
+                attr = json.loads(lead["attribution_json"]) if lead["attribution_json"] else {}
+            except Exception:
+                attr = {}
+            attr = {k: clean_attribution_value(v) for k, v in attr.items()}
+            attr = {k: v for k, v in attr.items() if v is not None}
+            click_id = lead["click_id"]
+
+        first = accounts[0]
+        item = {
+            "email": email_key,
+            "broker_id": None,
+            "status": "FxPro account",
+            "country": first.get("country"),
+            "click_id": click_id,
+            "registration_date": min(reg_dates) if reg_dates else None,
+            # The full account report has total deposits, not a true first-fund
+            # event. Keep this as a funded summary rather than pretending it is
+            # an exact FTD date.
+            "first_fund_date": None,
+            "first_fund_amount": deposits if deposits > 0 else None,
+            "first_trade_date": min(trade_dates) if trade_dates else None,
+            "last_trade_date": max(trade_dates) if trade_dates else None,
+            "net_deposits": deposits - withdrawals,
+            "deposits": deposits,
+            "latest_balance": balance,
+            "trading_volume": None,
+            "fxpro_accounts": accounts,
+            "fxpro_account_count": len(accounts),
+            "attribution": attr,
+            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
+            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+            "adset": attribution_text(attr, "adset_name", "adset_id"),
+            "ad": attribution_text(attr, "ad_id"),
+            "placement": attribution_text(attr, "placement"),
+            "chat_link": attr.get("chatlink"),
+            "events": [],
+        }
+        if item["registration_date"]:
+            item["events"].append({"type":"REG","date":item["registration_date"]})
+        if item["first_trade_date"]:
+            item["events"].append({"type":"FT","date":item["first_trade_date"]})
+        if deposits > 0:
+            item["events"].append({"type":"FUNDED","amount":deposits})
+        if user["role"] == "seo":
+            for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
+                item[key] = None
+            for account in item["fxpro_accounts"]:
+                for key in ("deposits", "withdrawals", "latest_balance", "usd"):
+                    account[key] = None
+        result.append(item)
+
+    return {"clients": result[:20]}
 
 
 @app.get("/api/v1/traffic")
