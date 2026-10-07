@@ -222,7 +222,7 @@ function App() {
         </div>
         <div className="attr-header"><span>CAMPAIGN / SOURCE</span><span>ADSET · AD · PLACEMENT</span><span>RESULT</span></div>
         <div className="click-table attribution-table">
-          {(stats.chatterfy?.attribution || []).map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
+          {(stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)).map((x, i) => <div className="attribution-row" key={x.click_id + "-" + i}>
             <div className="attr-main"><b>{x.campaign}</b><small>{x.source}</small><em>{x.click_id}</em></div>
             <div className="attr-meta"><span>{x.adset}</span><span>{x.ad}</span><span>{x.placement}</span></div>
             <div className="attr-stats"><b>{x.leads}</b><span>LEAD</span><strong>{x.ftd} FTD</strong><span>${Number(x.deposits || 0).toFixed(2)}</span></div>
