@@ -22,6 +22,9 @@ function App() {
   const [importMessage, setImportMessage] = useState("");
   const [stats, setStats] = useState({ leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 });
   const [finance, setFinance] = useState(null);
+  const [traffic, setTraffic] = useState([]);
+  const [trafficCampaign, setTrafficCampaign] = useState("all");
+  const [trafficSource, setTrafficSource] = useState("all");
   const [tab, setTab] = useState("dashboard");
   const [team, setTeam] = useState([]);
   const [newUser, setNewUser] = useState("");
@@ -34,8 +37,8 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "admin"] },
-    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "admin"] },
+    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance", "traffic"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
   }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
@@ -79,7 +82,9 @@ function App() {
     if (effectiveUser.is_admin) loadTeam();
   }, [effectiveUser.username, effectiveUser.is_admin]);
 
-  React.useEffect(() => { if (canSee("finance")) loadFinance(); }, [effectiveUser.username, effectiveUser.role, tab]);
+  React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); }, [effectiveUser.username, effectiveUser.role, tab]);
+
+  async function loadTraffic() { if (!canSee("traffic")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/traffic", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setTraffic((await res.json()).rows || []); } catch (error) { console.error(error); } }
 
   async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
 
@@ -342,6 +347,11 @@ function App() {
       </section>}
       {!loading && !client && query && <section className="card"><p>No client found.</p></section>}
 
+      {tab === "traffic" && canSee("traffic") && <section className="role-dashboard traffic-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">TRAFFIC ANALYTICS · CHATTERFY</p><h2>Traffic performance</h2><p>Campaign → Source → AdSet → Ad → Placement.</p></div><span>◉</span></div>
+        <div className="buying-filters"><select value={trafficCampaign} onChange={e => setTrafficCampaign(e.target.value)}><option value="all">All campaigns</option>{[...new Set(traffic.map(x => x.campaign).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select><select value={trafficSource} onChange={e => setTrafficSource(e.target.value)}><option value="all">All sources</option>{[...new Set(traffic.map(x => x.source).filter(Boolean))].sort().map(x => <option key={x} value={x}>{x}</option>)}</select></div>
+        <div className="traffic-table">{traffic.filter(x => (trafficCampaign === "all" || x.campaign === trafficCampaign) && (trafficSource === "all" || x.source === trafficSource)).map((x,i) => <div className="traffic-card-row" key={x.campaign+x.source+x.adset+x.ad+i}><div><b>{x.campaign}</b><small>{x.source} · {x.adset}</small><small>{x.ad} · {x.placement}</small></div><span>{x.leads} leads</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><span>{x.ft} FT</span><span>{x.reg_to_ftd}%</span><strong>{"$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
+      </section>}
       {tab === "finance" && canSee("finance") && <section className="role-dashboard finance-dashboard">
         <div className="role-hero"><div><p className="eyebrow">FINANCE · FXPRO</p><h2>Deposits & cash flow</h2><p>Account-level financial performance from the latest FxPro report.</p></div><span>💰</span></div>
         <div className="exec-kpis">
@@ -357,6 +367,7 @@ function App() {
         <NavButton id="clients">Clients</NavButton>
         {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
         {canSee("finance") && <NavButton id="finance">Finance</NavButton>}
+        {canSee("traffic") && <NavButton id="traffic">Traffic</NavButton>}
         {effectiveUser.is_admin && <NavButton id="admin">Admin</NavButton>}
       </nav>
     </main>
