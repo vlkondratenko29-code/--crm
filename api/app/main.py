@@ -811,6 +811,17 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
             dict(a) for a in account_rows
             if (a["email"] or "").strip().lower() == email_key
         ]
+        # Always resolve FxPro accounts directly by normalized email as well.
+        # This prevents a lead/broker row from hiding a real FxPro account when
+        # the search term matched the client row but the account query used a
+        # slightly different email representation.
+        if not item["fxpro_accounts"] and email_key:
+            direct_accounts = conn.execute("""
+                SELECT * FROM fxpro_accounts
+                WHERE lower(trim(coalesce(email,''))) = %s
+                ORDER BY registration_date ASC NULLS LAST, login
+            """, (email_key,)).fetchall()
+            item["fxpro_accounts"] = [dict(a) for a in direct_accounts]
         item["fxpro_account_count"] = len(item["fxpro_accounts"])
         if user["role"] == "seo":
             for key in ("first_fund_amount", "net_deposits", "deposits", "latest_balance", "trading_volume"):
