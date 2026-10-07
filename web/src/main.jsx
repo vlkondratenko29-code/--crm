@@ -25,6 +25,9 @@ function App() {
   const [team, setTeam] = useState([]);
   const [newUser, setNewUser] = useState("");
   const [newRole, setNewRole] = useState("handler");
+  const [teamMessage, setTeamMessage] = useState("");
+  const [savingUser, setSavingUser] = useState(false);
+  const effectiveUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
 
   React.useEffect(() => {
     tg?.ready?.();
@@ -58,6 +61,10 @@ function App() {
     loadTeam();
   }, [user.username]);
 
+  React.useEffect(() => {
+    if (effectiveUser.is_admin) loadTeam();
+  }, [effectiveUser.username, effectiveUser.is_admin]);
+
   async function loadTeam() {
     if (!effectiveUser.is_admin) return;
     const base = import.meta.env.VITE_API_URL || "";
@@ -66,14 +73,30 @@ function App() {
   }
 
   async function saveTeamUser() {
-    if (!newUser.trim()) return;
-    const base = import.meta.env.VITE_API_URL || "";
-    const res = await fetch(base + "/api/v1/users", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Telegram-Username": effectiveUser.username || "jokwq" },
-      body: JSON.stringify({ username: newUser.trim(), role: newRole, active: true })
-    });
-    if (res.ok) { setNewUser(""); await loadTeam(); }
+    const username = newUser.trim().replace(/^@+/, "").toLowerCase();
+    if (!username) {
+      setTeamMessage("Введи Telegram username, например @handler1");
+      return;
+    }
+    setSavingUser(true);
+    setTeamMessage("");
+    try {
+      const base = import.meta.env.VITE_API_URL || "";
+      const res = await fetch(base + "/api/v1/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Username": effectiveUser.username || "jokwq" },
+        body: JSON.stringify({ username, role: newRole, active: true })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "Не удалось добавить пользователя");
+      setNewUser("");
+      setTeamMessage("@" + username + " добавлен как " + newRole);
+      await loadTeam();
+    } catch (error) {
+      setTeamMessage(error.message);
+    } finally {
+      setSavingUser(false);
+    }
   }
 
   async function disableTeamUser(username) {
