@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { authHeaders } from "./api.js";
 import Leads from "./Leads.jsx";
+import Reconcile from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
 // Outside Telegram (plain browser) there is no signed user. The demo admin is
@@ -49,8 +50,8 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "leads", "clients", "stats", "finance", "traffic", "operations", "alerts", "admin"] },
-    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "leads", "clients", "stats", "finance", "traffic"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "leads", "reconcile", "clients", "stats", "finance", "traffic", "operations", "alerts", "admin"] },
+    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "leads", "reconcile", "clients", "stats", "finance", "traffic"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "leads", "clients"] },
   }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "leads", "clients"] };
@@ -213,7 +214,7 @@ function App() {
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10b</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10c</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -334,6 +335,7 @@ function App() {
       </section>}
 
       {tab === "leads" && canSee("leads") && <Leads username={effectiveUser.username} role={effectiveUser.role} />}
+      {tab === "reconcile" && canSee("reconcile") && <Reconcile username={effectiveUser.username} isAdmin={actualUser.is_admin} />}
 
       {tab === "clients" && <section className="search-card">
         <h2>Find client</h2>
@@ -482,6 +484,7 @@ function App() {
       <nav>
         <NavButton id="dashboard">Dashboard</NavButton>
         {canSee("leads") && <NavButton id="leads">Leads</NavButton>}
+        {canSee("reconcile") && <NavButton id="reconcile">Reconcile</NavButton>}
         <NavButton id="clients">Clients</NavButton>
         {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
         {canSee("finance") && <NavButton id="finance">Finance</NavButton>}

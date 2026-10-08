@@ -10,6 +10,7 @@ const WORK_LABELS = {
   won: "Done",
   lost: "Lost",
 };
+const MATCH_NAMES = { label: "label", email: "email", phone: "phone" };
 const PERIODS = [["0", "All time"], ["1", "Today"], ["7", "7 days"], ["30", "30 days"]];
 const PAGE = 50;
 
@@ -110,7 +111,7 @@ export default function Leads({ username, role }) {
             <div className="lead-meta">
               <span>{lead.assignee ? "@" + lead.assignee : "Unassigned"}</span>
               {lead.notes > 0 && <span>💬 {lead.notes}</span>}
-              {lead.fxpro_linked && <span>FxPro ✓</span>}
+              {lead.brokers?.length > 0 && <span title={"Matched by " + lead.broker_match}>{lead.brokers.join(", ")} ✓</span>}
               <span>{shortDate(lead.last_activity)}</span>
             </div>
           </button>
@@ -171,9 +172,17 @@ function LeadCard({ leadKey, username, canAssign, team, onBack }) {
           <span>Source</span><b>{lead.source || "—"}</b>
           <span>Click ID</span><b>{lead.click_id || "—"}</b>
           <span>First seen</span><b>{shortDate(lead.first_seen_at)}</b>
-          <span>FxPro</span><b>{lead.fxpro_linked ? "Linked" : "Not found yet"}</b>
+          <span>Phone</span><b>{lead.phone || "—"}</b>
+          <span>Broker</span><b>{lead.brokers?.length ? `${lead.brokers.join(", ")} · by ${MATCH_NAMES[lead.broker_match] || lead.broker_match}` : "Not found yet"}</b>
           {lead.ftd_amount != null && <><span>FTD amount</span><b>${Number(lead.ftd_amount).toFixed(2)}</b></>}
         </div>
+        {(lead.broker_accounts || []).length > 0 && <>
+          <div className="section-title">Broker accounts</div>
+          <div className="recent-list">{lead.broker_accounts.map((a, i) => <div key={a.broker + a.account_id + i}>
+            <div><b>{a.broker} · #{a.account_id}</b><small>Reg {shortDate(a.registration_date)}{a.ftd_date ? " · FTD " + shortDate(a.ftd_date) : ""}{a.label ? " · label " + a.label : ""}</small></div>
+            <span>{a.deposits != null ? "$" + Number(a.deposits).toFixed(0) : ""}</span>
+          </div>)}</div>
+        </>}
         {lead.chat_link && <a className="chat-link" href={lead.chat_link} target="_blank" rel="noreferrer">Open Chatterfy chat ↗</a>}
 
         <div className="section-title">Processing</div>
