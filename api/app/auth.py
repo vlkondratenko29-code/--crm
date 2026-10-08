@@ -23,12 +23,18 @@ def validate_init_data(init_data: str, bot_token: str, max_age_seconds: int = 7 
     received_hash = pairs.pop("hash", None)
     if not received_hash:
         return None
-    # `signature` is the newer Ed25519 field; it is not part of the HMAC check.
-    pairs.pop("signature", None)
-    data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
-    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    expected = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, received_hash):
+    secret_key = hmac.new(b"WebAppData", bot_token.strip().encode(), hashlib.sha256).digest()
+
+    def digest(fields):
+        data_check_string = "\n".join(f"{k}={fields[k]}" for k in sorted(fields))
+        return hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    # The HMAC covers every field except `hash` (including the newer
+    # `signature` field). Clients that predate `signature` simply omit it.
+    # Also accept the variant without `signature` for older client builds.
+    without_signature = {k: v for k, v in pairs.items() if k != "signature"}
+    if not (hmac.compare_digest(digest(pairs), received_hash)
+            or hmac.compare_digest(digest(without_signature), received_hash)):
         return None
     try:
         auth_date = int(pairs.get("auth_date", "0"))
