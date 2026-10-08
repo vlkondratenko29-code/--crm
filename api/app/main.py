@@ -1332,55 +1332,54 @@ def traffic(x_telegram_username: str = Depends(current_username)):
     user = require_access(username)
     conn = db()
     try:
-        rows = conn.execute("""
-            SELECT b.email, b.registration_date, b.first_fund_date, b.first_trade_date,
-                   b.first_fund_amount, l.click_id AS chatterfy_click_id, l.attribution_json
-            FROM broker_clients b
-            LEFT JOIN chatterfy_leads l ON lower(l.email) = lower(b.email)
-        """).fetchall()
+        leads = conn.execute("SELECT chat_id,email,click_id,attribution_json FROM chatterfy_leads").fetchall()
+        events = conn.execute("SELECT email,event_type,event_date,amount,chat_id FROM crm_events WHERE source='chatterfy'").fetchall()
     finally:
         conn.close()
 
-    import json
-    best = {}
-    for r in rows:
-        try:
-            raw = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
-        except Exception:
-            raw = {}
-        attr = {k: clean_attribution_value(v) for k, v in raw.items()}
-        attr = {k: v for k, v in attr.items() if v is not None}
-        if not attr:
+    by_email, by_chat = {}, {}
+    for ev in events:
+        et = str(ev["event_type"] or "").upper()
+        if et not in STAGE_ORDER:
             continue
-        score = sum(1 for k in ("tracker_campaign", "tracker_source", "tracker_campaign_type",
-                                "tracker_provider_type", "tracker_domain_id", "tracker_landing_id",
-                                "click_id", "ad_id", "adset_id", "placement") if attr.get(k))
-        email = (r["email"] or "").strip().lower()
-        if email and (email not in best or score > best[email]["score"]):
-            best[email] = {"row": r, "attr": attr, "score": score}
+        if ev["email"] and not str(ev["email"]).startswith("chat:"):
+            by_email.setdefault(str(ev["email"]).strip().lower(), []).append(ev)
+        if ev["chat_id"]:
+            by_chat.setdefault(str(ev["chat_id"]), []).append(ev)
 
     grouped = {}
-    for item in best.values():
-        r, attr = item["row"], item["attr"]
+    for lead in leads:
+        email = (lead["email"] or "").strip().lower()
+        evs = list(by_email.get(email, [])) if email else []
+        evs.extend(by_chat.get(str(lead["chat_id"]), []))
+        types, ftd_amount = set(), 0.0
+        for ev in evs:
+            et = str(ev["event_type"] or "").upper()
+            if et in STAGE_ORDER:
+                types.add(et)
+                if et == "FTD" and ev["amount"] is not None:
+                    ftd_amount = max(ftd_amount, float(ev["amount"] or 0))
+
+        try:
+            attr = json.loads(lead["attribution_json"]) if lead["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in attr.items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
         campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign") or "Unknown campaign"
         source = attribution_text(attr, "tracker_source_name", "tracker_source") or "Unknown source"
         adset = attribution_text(attr, "adset_name", "adset_id") or "Unknown adset"
         ad = attribution_text(attr, "ad_id") or "Unknown ad"
         placement = attribution_text(attr, "placement") or "Unknown placement"
-        click = attribution_text(attr, "clickid") or r["chatterfy_click_id"] or ""
-        click = str(click).strip() or "No Click ID"
+        click = attribution_text(attr, "clickid") or lead["click_id"] or "No Click ID"
         key = (campaign, source, adset, ad, placement)
-        g = grouped.setdefault(key, {
-            "campaign": campaign, "source": source, "adset": adset, "ad": ad,
-            "placement": placement, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0,
-            "clicks": set()
-        })
+        g = grouped.setdefault(key, {"campaign": campaign, "source": source, "adset": adset, "ad": ad, "placement": placement, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0, "clicks": set()})
         g["leads"] += 1
-        g["reg"] += 1 if r["registration_date"] else 0
-        g["ftd"] += 1 if r["first_fund_date"] else 0
-        g["ft"] += 1 if r["first_trade_date"] else 0
-        g["deposits"] += float(r["first_fund_amount"] or 0)
-        g["clicks"].add(click)
+        g["reg"] += int("REG" in types)
+        g["ftd"] += int("FTD" in types)
+        g["ft"] += int("FT" in types)
+        g["deposits"] += ftd_amount
+        g["clicks"].add(str(click))
 
     result = []
     for g in grouped.values():
@@ -1389,12 +1388,7 @@ def traffic(x_telegram_username: str = Depends(current_username)):
         g["ftd_to_ft"] = round(g["ft"] / g["ftd"] * 100, 1) if g["ftd"] else 0
         result.append(g)
     result.sort(key=lambda x: (x["ftd"], x["deposits"], x["leads"]), reverse=True)
-
-    return {
-        "rows": result,
-        "total": len(result),
-        "viewer": user["role"],
-    }
+    return {"rows": result, "total": len(result), "viewer": user["role"]}
 
 @app.get("/api/v1/finance")
 def finance(x_telegram_username: str = Depends(current_username)):
@@ -1409,9 +1403,10 @@ def finance(x_telegram_username: str = Depends(current_username)):
             SELECT country, deposits, withdrawals, latest_balance, usd
             FROM fxpro_accounts
         """).fetchall()
-        clients = conn.execute("""
-            SELECT country, first_fund_date, first_fund_amount, net_deposits
-            FROM broker_clients
+        ftd_events = conn.execute("""
+            SELECT email,chat_id,amount
+            FROM crm_events
+            WHERE source='chatterfy' AND upper(event_type)='FTD'
         """).fetchall()
     finally:
         conn.close()
@@ -1421,8 +1416,16 @@ def finance(x_telegram_username: str = Depends(current_username)):
     balance = sum(float(r["latest_balance"] or 0) for r in accounts)
     account_net = account_deposits - withdrawals
 
-    ftd_deposits = sum(float(r["first_fund_amount"] or 0) for r in clients if r["first_fund_date"])
-    ftd_count = sum(1 for r in clients if r["first_fund_date"])
+    # FTD is an authoritative Chatterfy funnel event; FxPro supplies account-level cash state.
+    ftd_keys = set()
+    ftd_deposits = 0.0
+    for r in ftd_events:
+        key = ((str(r["email"]).strip().lower() if r["email"] else "") or f"chat:{r['chat_id']}")
+        if key in ftd_keys:
+            continue
+        ftd_keys.add(key)
+        ftd_deposits += float(r["amount"] or 0)
+    ftd_count = len(ftd_keys)
 
     geo = {}
     for r in accounts:
@@ -1496,7 +1499,7 @@ def operations(x_telegram_username: str = Depends(current_username)):
         except Exception:
             attr = {}
         pending.append({
-            "email": r["email"],
+            "email": r["email"] or f"Telegram {r['chat_id']}",
             "chat_id": r["chat_id"],
             "click_id": r["click_id"],
             "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
@@ -1525,7 +1528,7 @@ def alerts(x_telegram_username: str = Depends(current_username)):
         raise HTTPException(status_code=403, detail="Alerts access required")
     conn = db()
     try:
-        leads = conn.execute("SELECT email, chat_id, click_id, attribution_json FROM chatterfy_leads WHERE email IS NOT NULL AND trim(email) <> '' ORDER BY chat_id DESC LIMIT 100").fetchall()
+        leads = conn.execute("SELECT email, chat_id, click_id, attribution_json FROM chatterfy_leads ORDER BY chat_id DESC LIMIT 100").fetchall()
         accounts = conn.execute("SELECT DISTINCT lower(trim(email)) AS email FROM fxpro_accounts WHERE email IS NOT NULL AND trim(email) <> ''").fetchall()
         events = conn.execute("SELECT email, event_type, event_date, amount, broker_id, fxpro_login, chat_id, created_at FROM crm_events WHERE source = 'chatterfy' ORDER BY created_at DESC LIMIT 30").fetchall()
     finally:
@@ -1543,8 +1546,8 @@ def alerts(x_telegram_username: str = Depends(current_username)):
         campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
         source = attribution_text(attr, "tracker_source_name", "tracker_source")
         click = attribution_text(attr, "clickid") or row["click_id"]
-        item = {"email": row["email"], "chat_id": row["chat_id"], "click_id": click, "campaign": campaign, "source": source}
-        if row["email"].strip().lower() not in account_emails:
+        item = {"email": row["email"] or f"Telegram {row['chat_id']}", "chat_id": row["chat_id"], "click_id": click, "campaign": campaign, "source": source}
+        if not row["email"] or row["email"].strip().lower() not in account_emails:
             pending.append(item)
         if not click and not campaign and not source:
             missing_attribution.append({"email": row["email"], "chat_id": row["chat_id"]})
@@ -1565,159 +1568,146 @@ def dashboard(days: int = 0, x_telegram_username: str = Depends(current_username
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
-    rows = conn.execute("SELECT * FROM broker_clients ORDER BY registration_date DESC NULLS LAST").fetchall()
-    conn.close()
-    # Optional period filter: clients registered within the last N days.
-    cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat() if days and days > 0 else None
-    if cutoff:
-        rows = [r for r in rows if (r["registration_date"] or "") >= cutoff]
-    period_emails = {(r["email"] or "").strip().lower() for r in rows}
-
-    total = len(rows)
-    reg = sum(1 for r in rows if r["registration_date"])
-    ftd = sum(1 for r in rows if r["first_fund_date"])
-    ft = sum(1 for r in rows if r["first_trade_date"])
-    deposits = sum(float(r["first_fund_amount"] or 0) for r in rows)
-
-    countries = {}
-    click_stats = {}
-    attribution_stats = {}
-    for r in rows:
-        country = (r["country"] or "Unknown").strip() or "Unknown"
-        countries[country] = countries.get(country, 0) + 1
-        click_id = (r["click_id"] or "").strip() or "No Click ID"
-        bucket = click_stats.setdefault(click_id, {"click_id": click_id, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
-        bucket["leads"] += 1
-        bucket["reg"] += 1 if r["registration_date"] else 0
-        bucket["ftd"] += 1 if r["first_fund_date"] else 0
-        bucket["ft"] += 1 if r["first_trade_date"] else 0
-        bucket["deposits"] += float(r["first_fund_amount"] or 0)
-
-    # Chatterfy is the attribution source. Join its latest stored attribution
-    # to broker clients by email so Buying can see Campaign → Source → AdSet → Ad.
-    lead_rows = None
-    attr_conn = db()
     try:
-        lead_rows = attr_conn.execute("""
-            SELECT b.email, b.click_id, b.registration_date, b.first_fund_date, b.first_trade_date,
-                   b.first_fund_amount, l.click_id AS chatterfy_click_id, l.attribution_json
-            FROM broker_clients b
-            LEFT JOIN chatterfy_leads l ON lower(l.email) = lower(b.email)
+        lead_rows = conn.execute("""
+            SELECT chat_id,email,click_id,attribution_json,first_seen_at,updated_at
+            FROM chatterfy_leads
+            ORDER BY first_seen_at DESC NULLS LAST, chat_id DESC
+        """).fetchall()
+        event_rows = conn.execute("""
+            SELECT email,event_type,event_date,amount,chat_id,created_at
+            FROM crm_events
+            WHERE source='chatterfy'
+            ORDER BY event_date ASC NULLS LAST, created_at ASC
+        """).fetchall()
+        account_rows = conn.execute("""
+            SELECT lower(trim(email)) AS email,country
+            FROM fxpro_accounts
+            WHERE email IS NOT NULL AND trim(email) <> ''
         """).fetchall()
     finally:
-        attr_conn.close()
+        conn.close()
 
-    import json
+    cutoff = (datetime.utcnow() - timedelta(days=days)) if days and days > 0 else None
+    leads = []
+    for row in lead_rows:
+        if cutoff and row["first_seen_at"]:
+            try:
+                if datetime.fromisoformat(str(row["first_seen_at"]).replace("Z", "+00:00")).replace(tzinfo=None) < cutoff:
+                    continue
+            except Exception:
+                pass
+        leads.append(row)
 
-    # Pick the best Chatterfy attribution per FxPro email. Test conversations can
-    # leave multiple webhook rows for the same client; ignore placeholders/empty
-    # attribution and prefer the row with the richest real tracker data.
-    best_by_email = {}
-    for r in lead_rows:
-        if cutoff and (r["email"] or "").strip().lower() not in period_emails:
+    def lead_key(email, chat_id):
+        return (str(email).strip().lower() if email else "") or f"chat:{chat_id}"
+
+    by_email = {}
+    by_chat = {}
+    for ev in event_rows:
+        et = str(ev["event_type"] or "").upper()
+        if et not in STAGE_ORDER:
             continue
-        try:
-            raw_attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
-        except Exception:
-            raw_attr = {}
-        attr = {k: clean_attribution_value(v) for k, v in raw_attr.items()}
-        attr = {k: v for k, v in attr.items() if v is not None}
-        if not attr:
-            continue
-        score = sum(1 for k in (
-            "tracker_campaign", "tracker_source", "tracker_campaign_type",
-            "tracker_provider_type", "tracker_domain_id", "tracker_landing_id",
-            "click_id", "ad_id", "adset_id", "placement"
-        ) if attr.get(k))
-        email_key = (r["email"] or "").strip().lower()
-        current = best_by_email.get(email_key)
-        if current is None or score > current["score"]:
-            best_by_email[email_key] = {"row": r, "attr": attr, "score": score}
+        if ev["email"] and not str(ev["email"]).startswith("chat:"):
+            by_email.setdefault(str(ev["email"]).strip().lower(), []).append(ev)
+        if ev["chat_id"]:
+            by_chat.setdefault(str(ev["chat_id"]), []).append(ev)
 
-    for entry in best_by_email.values():
-        r = entry["row"]
-        attr = entry["attr"]
-        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
-        source = attribution_text(attr, "tracker_source_name", "tracker_source")
-        adset = attribution_text(attr, "adset_name", "adset_id")
-        ad = attribution_text(attr, "ad_id")
-        placement = attribution_text(attr, "placement")
-        click = attribution_text(attr, "clickid") or r["chatterfy_click_id"] or r["click_id"] or ""
-        click = str(click).strip()
-        # Only put real Chatterfy attribution into Buying analytics.
-        if not campaign and not source and not click:
-            continue
-        campaign = campaign or "Unknown campaign"
-        source = source or "Unknown source"
-        adset = adset or "Unknown adset"
-        ad = ad or "Unknown ad"
-        placement = placement or "Unknown placement"
-        click = click or "No Click ID"
-        key = (campaign, source, adset, ad, placement, click)
-        bucket = attribution_stats.setdefault(key, {
-            "campaign": campaign, "source": source, "adset": adset, "ad": ad,
-            "placement": placement, "click_id": click, "leads": 0, "reg": 0,
-            "ftd": 0, "ft": 0, "deposits": 0.0
-        })
-        bucket["leads"] += 1
-        bucket["reg"] += 1 if r["registration_date"] else 0
-        bucket["ftd"] += 1 if r["first_fund_date"] else 0
-        bucket["ft"] += 1 if r["first_trade_date"] else 0
-        bucket["deposits"] += float(r["first_fund_amount"] or 0)
+    def stage_for_lead(row):
+        email = (row["email"] or "").strip().lower()
+        events = list(by_email.get(email, [])) if email else []
+        events.extend(by_chat.get(str(row["chat_id"]), []))
+        types, dates, amount = set(), {}, 0.0
+        for ev in events:
+            et = str(ev["event_type"] or "").upper()
+            if et not in STAGE_ORDER:
+                continue
+            if cutoff and ev["event_date"]:
+                try:
+                    if datetime.fromisoformat(str(ev["event_date"]).replace("Z", "+00:00")).replace(tzinfo=None) < cutoff:
+                        continue
+                except Exception:
+                    pass
+            types.add(et)
+            if ev["event_date"] and (et not in dates or str(ev["event_date"]) < str(dates[et])):
+                dates[et] = ev["event_date"]
+            if et == "FTD" and ev["amount"] is not None:
+                amount = max(amount, float(ev["amount"] or 0))
+        return {"types": types, "dates": dates, "amount": amount}
 
-    geo_stats = {}
-    daily_stats = {}
-    for r in rows:
-        geo = (r["country"] or "Unknown").strip() or "Unknown"
-        g = geo_stats.setdefault(geo, {"country": geo, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+    account_country = {}
+    for row in account_rows:
+        account_country.setdefault(row["email"], row["country"])
+
+    lead_states = [(row, stage_for_lead(row)) for row in leads]
+    total = len(leads)
+    reg = sum("REG" in state["types"] for _, state in lead_states)
+    ftd = sum("FTD" in state["types"] for _, state in lead_states)
+    ft = sum("FT" in state["types"] for _, state in lead_states)
+    deposits = sum(state["amount"] for _, state in lead_states if "FTD" in state["types"])
+
+    countries, geo_stats, daily_stats, attribution_stats = {}, {}, {}, {}
+    for row, state in lead_states:
+        email = (row["email"] or "").strip().lower()
+        country = (account_country.get(email) or "Unknown").strip() or "Unknown"
+        countries[country] = countries.get(country, 0) + 1
+        g = geo_stats.setdefault(country, {"country": country, "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
         g["leads"] += 1
-        g["reg"] += 1 if r["registration_date"] else 0
-        g["ftd"] += 1 if r["first_fund_date"] else 0
-        g["ft"] += 1 if r["first_trade_date"] else 0
-        g["deposits"] += float(r["first_fund_amount"] or 0)
-        for date_value, key in ((r["registration_date"], "reg"), (r["first_fund_date"], "ftd"), (r["first_trade_date"], "ft")):
+        g["reg"] += int("REG" in state["types"])
+        g["ftd"] += int("FTD" in state["types"])
+        g["ft"] += int("FT" in state["types"])
+        g["deposits"] += state["amount"]
+
+        for et in ("REG", "FTD", "FT"):
+            date_value = state["dates"].get(et)
             if date_value:
-                d = daily_stats.setdefault(date_value, {"date": date_value, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
-                d[key] += 1
-                if key == "ftd":
-                    d["deposits"] += float(r["first_fund_amount"] or 0)
+                d = daily_stats.setdefault(str(date_value)[:10], {"date": str(date_value)[:10], "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+                d[et.lower()] += 1
+                if et == "FTD":
+                    d["deposits"] += state["amount"]
+
+        try:
+            attr = json.loads(row["attribution_json"]) if row["attribution_json"] else {}
+        except Exception:
+            attr = {}
+        attr = {k: clean_attribution_value(v) for k, v in attr.items()}
+        attr = {k: v for k, v in attr.items() if v is not None}
+        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign") or "Unknown campaign"
+        source = attribution_text(attr, "tracker_source_name", "tracker_source") or "Unknown source"
+        adset = attribution_text(attr, "adset_name", "adset_id") or "Unknown adset"
+        ad = attribution_text(attr, "ad_id") or "Unknown ad"
+        placement = attribution_text(attr, "placement") or "Unknown placement"
+        click = attribution_text(attr, "clickid") or row["click_id"] or "No Click ID"
+        key = (campaign, source, adset, ad, placement, str(click))
+        bucket = attribution_stats.setdefault(key, {"campaign": campaign, "source": source, "adset": adset, "ad": ad, "placement": placement, "click_id": str(click), "leads": 0, "reg": 0, "ftd": 0, "ft": 0, "deposits": 0.0})
+        bucket["leads"] += 1
+        bucket["reg"] += int("REG" in state["types"])
+        bucket["ftd"] += int("FTD" in state["types"])
+        bucket["ft"] += int("FT" in state["types"])
+        bucket["deposits"] += state["amount"]
 
     top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:5]
     top_geo = sorted(geo_stats.values(), key=lambda x: (x["ftd"], x["deposits"], x["reg"]), reverse=True)[:12]
-    top_clicks = sorted(click_stats.values(), key=lambda x: (x["ftd"], x["leads"]), reverse=True)[:8]
     top_attribution = sorted(attribution_stats.values(), key=lambda x: (x["ftd"], x["reg"], x["leads"]), reverse=True)[:12]
-    for item in top_clicks:
-        item["reg_to_ftd"] = round(item["ftd"] / item["reg"] * 100, 1) if item["reg"] else 0
-        item["ftd_to_ft"] = round(item["ft"] / item["ftd"] * 100, 1) if item["ftd"] else 0
     for item in top_attribution:
         item["reg_to_ftd"] = round(item["ftd"] / item["reg"] * 100, 1) if item["reg"] else 0
         item["ftd_to_ft"] = round(item["ft"] / item["ftd"] * 100, 1) if item["ftd"] else 0
 
     recent = []
-    for r in rows[:5]:
+    for row, state in lead_states[:5]:
         recent.append({
-            "email": r["email"],
-            "country": r["country"],
-            "status": r["status"],
-            "registration_date": r["registration_date"],
-            "first_fund_date": r["first_fund_date"],
-            "first_trade_date": r["first_trade_date"],
-            "first_fund_amount": None if user["role"] == "seo" else r["first_fund_amount"],
-            "click_id": r["click_id"],
+            "email": row["email"] or f"Telegram {row['chat_id']}",
+            "country": account_country.get((row["email"] or "").strip().lower()),
+            "status": "FT" if "FT" in state["types"] else ("FTD" if "FTD" in state["types"] else ("REG" if "REG" in state["types"] else "LEAD")),
+            "registration_date": state["dates"].get("REG"),
+            "first_fund_date": state["dates"].get("FTD"),
+            "first_trade_date": state["dates"].get("FT"),
+            "first_fund_amount": None if user["role"] == "seo" else state["amount"],
+            "click_id": row["click_id"],
         })
 
-    try:
-        ops_conn = db()
-        fxpro_accounts_count = ops_conn.execute("SELECT COUNT(*) AS c FROM fxpro_accounts").fetchone()["c"]
-        ops_conn.close()
-    except Exception:
-        fxpro_accounts_count = 0
-
     return {
-        "leads": total,
-        "reg": reg,
-        "ftd": ftd,
-        "ft": ft,
+        "leads": total, "reg": reg, "ftd": ftd, "ft": ft,
         "deposits": deposits if user["role"] != "seo" else None,
         "viewer": {"username": user["username"], "role": user["role"]},
         "period_days": days if cutoff else 0,
@@ -1729,27 +1719,9 @@ def dashboard(days: int = 0, x_telegram_username: str = Depends(current_username
         "top_countries": [{"country": k, "count": v} for k, v in top_countries],
         "geo": top_geo,
         "daily": sorted(daily_stats.values(), key=lambda x: x["date"])[-30:],
-        "company": [{
-            "name": "FxPro",
-            "clients": total,
-            "reg": reg,
-            "ftd": ftd,
-            "ft": ft,
-            "deposits": deposits if user["role"] != "seo" else None,
-            "net_deposits": sum(float(r["net_deposits"] or 0) for r in rows) if user["role"] != "seo" else None,
-        }],
-        "operations": {
-            "clients": total,
-            "attributed_clients": len(best_by_email),
-            "unattributed_clients": max(total - len(best_by_email), 0),
-            "fxpro_accounts": fxpro_accounts_count,
-        },
-        "chatterfy": {
-            "tracker": "Chatterfy",
-            "clicks": top_clicks,
-            "attribution": top_attribution,
-            "matched_clients": len(best_by_email),
-        },
+        "company": [{"name": "FxPro", "clients": total, "reg": reg, "ftd": ftd, "ft": ft, "deposits": deposits if user["role"] != "seo" else None, "net_deposits": None}],
+        "operations": {"clients": total, "attributed_clients": sum(1 for row in leads if row["attribution_json"]), "unattributed_clients": sum(1 for row in leads if not row["attribution_json"]), "fxpro_accounts": len(account_rows)},
+        "chatterfy": {"tracker": "Chatterfy", "attribution": top_attribution, "matched_clients": sum(1 for row in leads if (row["email"] or "").strip().lower() in account_country)},
         "recent": recent,
     }
 
