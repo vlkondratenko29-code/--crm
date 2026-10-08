@@ -931,12 +931,18 @@ async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegra
                 else:
                     created += 1
                 # REG / FTD tags set by operators count as funnel events.
-                normalized_tags = {re.sub(r"\s+", " ", str(t).strip()).casefold() for t in lead["tags"]}
-                for event_type in ("REG", "FTD", "FT"):
-                    if event_type.casefold() in normalized_tags:
-                        if record_event(conn, email=f"chat:{lead['chat_id']}", event_type=event_type, source="chatterfy",
-                                        chat_id=lead["chat_id"], metadata={"from": "export_tag", "tag": event_type}):
-                            events += 1
+                # Chatterfy may export tags as "CRM: REG", "FTD | ...",
+                # JSON-like text, etc. Detect the funnel tokens inside each
+                # tag instead of requiring an exact tag string.
+                tag_text = " | ".join(str(t) for t in lead["tags"])
+                detected = []
+                for event_type in ("FTD", "REG", "FT"):
+                    if re.search(r"(?<![a-z0-9])" + event_type.casefold() + r"(?![a-z0-9])", tag_text.casefold()):
+                        detected.append(event_type)
+                for event_type in detected:
+                    if record_event(conn, email=f"chat:{lead['chat_id']}", event_type=event_type, source="chatterfy",
+                                    chat_id=lead["chat_id"], metadata={"from": "export_tag", "tag": event_type}):
+                        events += 1
         conn.commit()
     except HTTPException:
         raise
