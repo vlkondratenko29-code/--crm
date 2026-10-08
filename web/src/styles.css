@@ -257,10 +257,11 @@ nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transfo
   border-color:#34523a;
 }
 
-/* Navigation: scrollable row so 9 tabs fit on a phone */
-nav{display:flex;overflow-x:auto;scrollbar-width:none;z-index:50}
-nav::-webkit-scrollbar{display:none}
-nav button{flex:1 0 auto;padding:10px 12px}
+/* Navigation: every tab visible, wraps to a second row instead of hiding off-screen */
+nav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;overflow:visible;z-index:50}
+nav button{padding:9px 2px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.app{padding-bottom:150px}
+.admin-shortcut{margin-left:8px;background:#1d2a3c;border:1px solid #33465f}
 
 /* Period switch (dashboard / stats) */
 .period-switch{display:flex;gap:6px;overflow-x:auto;margin:0 0 14px;scrollbar-width:none}
