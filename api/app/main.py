@@ -162,6 +162,7 @@ def init_db():
         add_column(conn, "chatterfy_leads", "first_seen_at", "TEXT")
         add_column(conn, "chatterfy_leads", "updated_at", "TEXT")
         add_column(conn, "chatterfy_leads", "phone", "TEXT")
+        add_column(conn, "chatterfy_leads", "uid", "TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS crm_users (
                 username TEXT PRIMARY KEY,
@@ -630,7 +631,8 @@ def clean_attribution_value(value):
     if value is None:
         return None
     value = str(value).strip()
-    if not value or "{{" in value or "}}" in value:
+    # Unfilled Chatterfy placeholders arrive literally, e.g. "{datereg}" or "{{x}}".
+    if not value or "{{" in value or "}}" in value or (value.startswith("{") and value.endswith("}")):
         return None
     return value
 
@@ -729,7 +731,11 @@ async def chatterfy_webhook(
     attribution = {k: clean_attribution_value(v) for k, v in attribution.items()}
     incoming_attr = {k: v for k, v in attribution.items() if v is not None}
 
-    normalized_email = email.strip().lower() if email else None
+    # The Chatterfy field "UID / email клиента" may hold either an email or the
+    # client's broker account number (UID). Keep them apart.
+    raw_contact = (email or "").strip()
+    uid = broker_lib.normalize_account_id(raw_contact) or broker_lib.normalize_account_id(broker_id)
+    normalized_email = broker_lib.normalize_email(raw_contact)
     now = datetime.utcnow().isoformat()
     event_is_new = False
     conn = db()
@@ -747,21 +753,24 @@ async def chatterfy_webhook(
         merged_attr.update(incoming_attr)
         attribution_json = json.dumps(merged_attr, ensure_ascii=False)
         conn.execute(
-            "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json,first_seen_at,updated_at,phone) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json,first_seen_at,updated_at,phone,uid) VALUES(%s,%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT(chat_id) DO UPDATE SET "
+            "uid=COALESCE(excluded.uid,chatterfy_leads.uid), "
             "phone=COALESCE(excluded.phone,chatterfy_leads.phone), "
             "email=COALESCE(excluded.email,chatterfy_leads.email), "
             "click_id=COALESCE(excluded.click_id,chatterfy_leads.click_id), "
             "attribution_json=excluded.attribution_json, "
             "first_seen_at=COALESCE(chatterfy_leads.first_seen_at,excluded.first_seen_at), "
             "updated_at=excluded.updated_at",
-            (chat_id, normalized_email, click_id, attribution_json, now, now, broker_lib.normalize_phone(phone))
+            (chat_id, normalized_email, click_id, attribution_json, now, now, broker_lib.normalize_phone(phone), uid)
         )
         if broker_event:
+            # Leads without an email are keyed by their chat so REG/FTD still count.
             event_is_new = record_event(
-                conn, email=normalized_email, event_type=broker_event, event_date=datereg,
-                amount=to_float(deposit_amount), source="chatterfy", broker_id=broker_id,
-                chat_id=chat_id, metadata={"click_id": click_id}
+                conn, email=normalized_email or f"chat:{chat_id}", event_type=broker_event,
+                event_date=clean_attribution_value(datereg), amount=to_float(deposit_amount),
+                source="chatterfy", broker_id=uid or clean_attribution_value(broker_id),
+                chat_id=chat_id, metadata={"click_id": click_id, "uid": uid}
             )
         conn.commit()
     finally:
@@ -776,7 +785,8 @@ async def chatterfy_webhook(
         "email": normalized_email,
         "chat_id": chat_id,
         "lead_saved": True,
-        "event_saved": bool(broker_event) and bool(normalized_email),
+        "event_saved": bool(broker_event),
+        "uid": uid,
     }
 
 
@@ -842,6 +852,98 @@ async def import_broker_report(broker: str = Form(...), files: list[UploadFile] 
         "columns": mappings,
         "missing_keys": [k for k in ("label", "email", "phone") if k not in found],
     }
+
+
+def parse_chatterfy_export(raw: bytes):
+    """Parse Chatterfy 'Users → Export CSV' (Name;Telegram ID;Username;Tags;Started;...)."""
+    headers, rows = broker_lib.read_csv(raw)
+    norm = {broker_lib._norm_header(h): h for h in headers}
+    col = lambda *names: next((norm[broker_lib._norm_header(n)] for n in names if broker_lib._norm_header(n) in norm), None)
+    c_id, c_name, c_user = col("Telegram ID", "chat_id", "chatId"), col("Name"), col("Username")
+    c_tags, c_started, c_status, c_step = col("Tags"), col("Started"), col("Status"), col("Step")
+    c_last = col("Last User Message")
+    if not c_id:
+        raise HTTPException(status_code=400, detail="This does not look like a Chatterfy users export (no Telegram ID column)")
+    leads = []
+    for row in rows:
+        chat_id = str(row.get(c_id) or "").strip()
+        if not chat_id.isdigit():
+            continue
+        tags = [t.strip() for t in str(row.get(c_tags) or "").split(",") if t.strip()]
+
+        def stamp(column):
+            value = str(row.get(column) or "").strip() if column else ""
+            for fmt in ("%d.%m.%Y %H:%M", "%d.%m.%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return datetime.strptime(value, fmt).isoformat()
+                except ValueError:
+                    pass
+            return None
+        leads.append({
+            "chat_id": chat_id,
+            "name": (row.get(c_name) or "").strip() or None if c_name else None,
+            "username": (row.get(c_user) or "").strip().lstrip("@") or None if c_user else None,
+            "tags": tags,
+            "started": stamp(c_started),
+            "last_message": stamp(c_last),
+            "status": (row.get(c_status) or "").strip() or None if c_status else None,
+            "step": (row.get(c_step) or "").strip() or None if c_step else None,
+        })
+    return leads
+
+
+@app.post("/api/v1/chatterfy/import")
+async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegram_username: str = Depends(current_username)):
+    """Bring every Chatterfy chat into the CRM, including people who only wrote in DM."""
+    conn = db()
+    created = updated = events = 0
+    try:
+        require_admin(x_telegram_username, conn)
+        for file in files:
+            for lead in parse_chatterfy_export(await file.read()):
+                row = conn.execute("SELECT attribution_json FROM chatterfy_leads WHERE chat_id=%s", (lead["chat_id"],)).fetchone()
+                attr = {}
+                if row and row["attribution_json"]:
+                    try:
+                        attr = json.loads(row["attribution_json"]) or {}
+                    except Exception:
+                        attr = {}
+                # Webhook data wins; the export only fills gaps and refreshes tags/step.
+                for key in ("name", "username"):
+                    if lead[key] and not attr.get(key):
+                        attr[key] = lead[key]
+                attr["tags"] = ", ".join(lead["tags"]) or None
+                attr["chatterfy_status"] = lead["status"]
+                attr["chatterfy_step"] = lead["step"]
+                attr = {k: v for k, v in attr.items() if v is not None}
+                now = datetime.utcnow().isoformat()
+                conn.execute(
+                    "INSERT INTO chatterfy_leads(chat_id, attribution_json, first_seen_at, updated_at) VALUES(%s,%s,%s,%s) "
+                    "ON CONFLICT(chat_id) DO UPDATE SET attribution_json=excluded.attribution_json, "
+                    "first_seen_at=COALESCE(chatterfy_leads.first_seen_at, excluded.first_seen_at), "
+                    "updated_at=COALESCE(excluded.updated_at, chatterfy_leads.updated_at)",
+                    (lead["chat_id"], json.dumps(attr, ensure_ascii=False), lead["started"] or now, lead["last_message"]),
+                )
+                if row:
+                    updated += 1
+                else:
+                    created += 1
+                # REG / FTD tags set by operators count as funnel events.
+                upper = {t.upper() for t in lead["tags"]}
+                for event_type in ("REG", "FTD", "FT"):
+                    if event_type in upper:
+                        if record_event(conn, email=f"chat:{lead['chat_id']}", event_type=event_type, source="chatterfy",
+                                        chat_id=lead["chat_id"], metadata={"from": "export_tag"}):
+                            events += 1
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Chatterfy import failed: {type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    return {"status": "ok", "created": created, "updated": updated, "events_from_tags": events}
 
 
 @app.post("/api/v1/broker/fxpro/import")
@@ -1702,7 +1804,7 @@ def load_broker_accounts(conn, broker=None):
 def build_leads(conn, viewer, accounts=None):
     """Return every lead as a dict. Small enough to filter in Python."""
     lead_rows = conn.execute(
-        "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at, phone FROM chatterfy_leads"
+        "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at, phone, uid FROM chatterfy_leads"
     ).fetchall()
     event_rows = conn.execute(
         "SELECT email, event_type, event_date, amount, created_at FROM crm_events WHERE source='chatterfy'"
@@ -1737,9 +1839,11 @@ def build_leads(conn, viewer, accounts=None):
                 "first_seen_at": seen,
                 "updated_at": r["updated_at"],
                 "phone": None,
+                "uid": None,
             }
         current["chat_ids"].append(str(r["chat_id"]))
         current["phone"] = current["phone"] or r["phone"] or broker_lib.normalize_phone(attr.get("phone"))
+        current["uid"] = current["uid"] or r["uid"]
         if _attr_score(attr) >= _attr_score(current["attr"]):
             current["attr"] = {**current["attr"], **attr}
         current["click_id"] = current["click_id"] or attribution_text(attr, "clickid") or r["click_id"]
@@ -1751,7 +1855,9 @@ def build_leads(conn, viewer, accounts=None):
     result = []
     for key, item in leads.items():
         attr = item.pop("attr")
-        evs = events_by_email.get(item["email"] or "", [])
+        evs = list(events_by_email.get(item["email"] or "", [])) if item["email"] else []
+        for cid in item["chat_ids"]:
+            evs += events_by_email.get(f"chat:{cid}", [])
         stage = "LEAD"
         ftd_amount = None
         last_event_at = None
@@ -1766,12 +1872,14 @@ def build_leads(conn, viewer, accounts=None):
                 last_event_at = stamp
         w = work.get(key, {})
         labels = [x for x in [item["click_id"], *item["chat_ids"]] if x]
-        method, matched = broker_lib.match_lead({"labels": labels, "email": item["email"], "phone": item["phone"]}, account_index)
+        method, matched = broker_lib.match_lead({"account_ids": [item["uid"]] if item["uid"] else [], "labels": labels,
+                                                 "email": item["email"], "phone": item["phone"]}, account_index)
         activity = max(x for x in (item["updated_at"], last_event_at, w.get("updated_at"), item["first_seen_at"], "") if x is not None)
         result.append({
             **item,
             "name": attr.get("name"),
             "tg_username": attr.get("username"),
+            "tags": attr.get("tags"),
             "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign", "campaign_name", "utm_campaign"),
             "source": attribution_text(attr, "tracker_source_name", "tracker_source", "utm_source"),
             "chat_link": attr.get("chatlink"),
@@ -1821,7 +1929,8 @@ def list_leads(
 
     def match(x, skip=None):
         if needle and not any(needle in str(v or "").lower() for v in (
-                x["email"], x["click_id"], x["name"], x["tg_username"], x["campaign"], " ".join(x["chat_ids"]))):
+                x["email"], x["click_id"], x["name"], x["tg_username"], x["campaign"], " ".join(x["chat_ids"]),
+                x.get("uid"), x.get("tags"))):
             return False
         if cutoff and (x["first_seen_at"] or x["last_activity"] or "") < cutoff:
             return False
@@ -1870,12 +1979,13 @@ def lead_detail(lead_key: str, x_telegram_username: str = Depends(current_userna
             "SELECT id, author, body, created_at FROM lead_notes WHERE lead_key=%s ORDER BY created_at DESC",
             (lead_key,),
         ).fetchall()
-        events = []
-        if lead["email"]:
-            events = conn.execute(
-                "SELECT event_type, event_date, amount, created_at FROM crm_events WHERE lower(email)=%s AND source='chatterfy' ORDER BY event_date ASC NULLS LAST, created_at ASC",
-                (lead["email"],),
-            ).fetchall()
+        keys = ([lead["email"]] if lead["email"] else []) + [f"chat:{c}" for c in lead["chat_ids"]]
+        placeholders = ",".join(["%s"] * len(keys))
+        events = conn.execute(
+            f"SELECT event_type, event_date, amount, created_at FROM crm_events WHERE lower(email) IN ({placeholders}) "
+            "AND source='chatterfy' ORDER BY event_date ASC NULLS LAST, created_at ASC",
+            tuple(keys),
+        ).fetchall() if keys else []
     finally:
         conn.close()
     hide_money = user["role"] not in LEAD_MANAGER_ROLES
@@ -1886,10 +1996,13 @@ def lead_detail(lead_key: str, x_telegram_username: str = Depends(current_userna
         "deposits": None if hide_money else a.get("deposits"),
         "balance": None if hide_money else a.get("balance"),
     } for a in matched]
-    lead["events"] = [
-        {"type": e["event_type"], "date": e["event_date"] or e["created_at"], "amount": None if hide_money else e["amount"]}
-        for e in events
-    ]
+    seen_types = {}
+    for e in events:  # one entry per event type: the export and the webhook may both report REG
+        t = str(e["event_type"] or "").upper()
+        item = {"type": t, "date": e["event_date"] or e["created_at"], "amount": None if hide_money else e["amount"]}
+        if t not in seen_types or (item["amount"] is not None and seen_types[t]["amount"] is None):
+            seen_types[t] = item
+    lead["events"] = sorted(seen_types.values(), key=lambda x: STAGE_ORDER.get(x["type"], 9))
     lead["note_list"] = [dict(n) for n in notes]
     return lead
 
@@ -1922,7 +2035,7 @@ def _account_brief(a):
 
 def reconcile(leads, accounts):
     matched_ids = set()
-    by_method = {"label": 0, "email": 0, "phone": 0}
+    by_method = {"uid": 0, "label": 0, "email": 0, "phone": 0}
     ftd_no_deposit, deposit_no_ftd, amount_mismatch, not_found = [], [], [], []
     for lead in leads:
         accs = lead.get("matched_accounts") or []
@@ -1967,7 +2080,7 @@ def reconcile(leads, accounts):
         "counts": {
             "leads": len(leads),
             "matched": sum(by_method.values()),
-            "by_label": by_method["label"], "by_email": by_method["email"], "by_phone": by_method["phone"],
+            "by_uid": by_method["uid"], "by_label": by_method["label"], "by_email": by_method["email"], "by_phone": by_method["phone"],
             "broker_clients": len(clients),
             "unattributed_clients": len(unattributed),
             "unattributed_with_deposit": sum(1 for x in unattributed if float(x.get("deposits") or 0) > 0),

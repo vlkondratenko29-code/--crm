@@ -214,7 +214,7 @@ function App() {
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10c</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10d</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 

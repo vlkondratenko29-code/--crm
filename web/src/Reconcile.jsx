@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
 
-const MATCH_LABELS = { label: "Label / Click ID", email: "Email", phone: "Phone" };
+const MATCH_LABELS = { uid: "UID", label: "Label / Click ID", email: "Email", phone: "Phone" };
 const FIELD_LABELS = {
   account_id: "Account", email: "Email", phone: "Phone", label: "Label", name: "Name", country: "Country",
   registration_date: "Reg date", ftd_date: "FTD date", ftd_amount: "FTD amount", deposits: "Deposits",
@@ -65,6 +65,7 @@ export default function Reconcile({ username, isAdmin }) {
       {data && <>
         <div className="exec-kpis">
           <div><span>MATCHED LEADS</span><b>{c.matched} / {c.leads}</b></div>
+          <div><span>BY UID</span><b>{c.by_uid ?? 0}</b></div>
           <div><span>BY LABEL</span><b>{c.by_label}</b></div>
           <div><span>BY EMAIL</span><b>{c.by_email}</b></div>
           <div><span>BY PHONE</span><b>{c.by_phone}</b></div>
@@ -102,8 +103,41 @@ export default function Reconcile({ username, isAdmin }) {
           )} />
       </>}
 
+      {isAdmin && <ChatterfyUpload username={username} onDone={load} />}
       {isAdmin && <BrokerUpload username={username} brokers={data?.brokers || []} onDone={load} />}
     </section>
+  );
+}
+
+function ChatterfyUpload({ username, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  async function upload(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(true); setMsg("");
+    try {
+      const form = new FormData();
+      files.forEach(f => form.append("files", f));
+      const r = await api("/api/v1/chatterfy/import", { username, method: "POST", body: form, timeout: 120000 });
+      setMsg(`New leads: ${r.created} · updated: ${r.updated} · REG/FTD from tags: ${r.events_from_tags}`);
+      onDone?.();
+    } catch (err) { setMsg(err.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="recon-upload">
+      <div className="section-title">Upload Chatterfy users</div>
+      <p className="recon-hint">Chatterfy → bot → Users → Export CSV. Adds every chat to the CRM, including people who only wrote in DM, with their tags. Upload one file per bot.</p>
+      <label className={"upload-btn" + (busy ? " busy" : "")}>
+        {busy ? "Uploading…" : "Choose chats.csv"}
+        <input type="file" accept=".csv,text/csv" multiple disabled={busy} onChange={upload} />
+      </label>
+      {msg && <div className="team-message">{msg}</div>}
+    </div>
   );
 }
 
