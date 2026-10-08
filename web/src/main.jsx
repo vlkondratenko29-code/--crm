@@ -345,9 +345,7 @@ function App() {
           <span className="badge">{client.events?.at(-1)?.type || "LEAD"}</span>
         </div>
         <div style={{display:"flex", gap:8, flexWrap:"wrap", margin:"0 0 14px"}}>
-          {[...new Set(["LEAD", ...(client.events || []).map(e => String(e.type || "").toUpperCase()).filter(Boolean)])]
-            .filter(x => ["LEAD","REG","FTD","FT"].includes(x))
-            .sort((a,b) => ({LEAD:0,REG:1,FTD:2,FT:3}[a] ?? 9) - ({LEAD:0,REG:1,FTD:2,FT:3}[b] ?? 9))
+          {["LEAD","REG","FTD","FT"].filter(tag => tag === "LEAD" || (client.events || []).some(e => String(e.type || "").toUpperCase() === tag))
             .map(tag => <span key={tag} className="badge">{tag}</span>)}
         </div>
         <div className="client-grid">
