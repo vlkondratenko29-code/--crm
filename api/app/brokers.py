@@ -65,6 +65,14 @@ def normalize_phone(value):
     return digits[-10:]
 
 
+def normalize_account_id(value):
+    """Broker account number / UID as typed by an operator: digits only, 4+ long."""
+    text = str(value or "").strip()
+    if not re.fullmatch(r"#?\d[\d\s-]{3,}", text):
+        return None  # GUIDs, emails, names are not account numbers
+    return re.sub(r"\D", "", text)
+
+
 def normalize_label(value):
     value = str(value or "").strip().lower()
     if not value or value in {"-", "—", "none", "null", "n/a"} or "{{" in value:
@@ -171,8 +179,11 @@ def parse_broker_report(raw: bytes):
 
 def build_account_index(accounts):
     """Index broker accounts by label, email and phone for O(1) matching."""
-    index = {"label": {}, "email": {}, "phone": {}}
+    index = {"label": {}, "email": {}, "phone": {}, "account_id": {}}
     for acc in accounts:
+        acc_id = normalize_account_id(acc.get("account_id"))
+        if acc_id:
+            index["account_id"].setdefault(acc_id, []).append(acc)
         for key in ("label", "email", "phone"):
             value = acc.get(key)
             if key == "label":
@@ -188,6 +199,10 @@ def build_account_index(accounts):
 
 def match_lead(lead, index):
     """Return (method, accounts) for the most reliable match, or (None, [])."""
+    for uid in lead.get("account_ids") or []:
+        hit = index.get("account_id", {}).get(normalize_account_id(uid) or "")
+        if hit:
+            return "uid", hit
     for label in lead.get("labels") or []:
         hit = index["label"].get(normalize_label(label) or "")
         if hit:
