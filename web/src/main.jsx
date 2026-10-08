@@ -214,7 +214,7 @@ function App() {
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10d</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10e</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -271,6 +271,7 @@ function App() {
             } finally { setImporting(false); e.target.value = ""; }
           }} />
         </label>
+        <button className="upload-btn admin-shortcut" onClick={() => setTab("admin")}>Team & roles →</button>
         {importMessage && <p>{importMessage}</p>}
       </section>}
 
