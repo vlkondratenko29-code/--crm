@@ -1,9 +1,13 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { authHeaders } from "./api.js";
+import Leads from "./Leads.jsx";
 
 const tg = window.Telegram?.WebApp;
-const demoUser = { username: "jokwq", role: "admin", is_admin: true };
+// Outside Telegram (plain browser) there is no signed user. The demo admin is
+// only for `npm run dev`; production builds start as a no-access guest.
+const demoUser = import.meta.env.DEV ? { username: "jokwq", role: "admin", is_admin: true } : { username: "", role: "guest", is_admin: false };
 
 
 function App() {
@@ -16,7 +20,11 @@ function App() {
   }, [telegramUser]);
   const [query, setQuery] = useState("");
   const [roleInfo, setRoleInfo] = useState(null);
+  const [accessError, setAccessError] = useState("");
   const [client, setClient] = useState(null);
+  const [results, setResults] = useState([]);
+  const [searched, setSearched] = useState(false);
+  const [period, setPeriod] = useState("0");
   const [debugInfo, setDebugInfo] = useState(null);
   const [debugLoading, setDebugLoading] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -41,11 +49,11 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "operations", "alerts", "admin"] },
-    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance", "traffic"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "leads", "clients", "stats", "finance", "traffic", "operations", "alerts", "admin"] },
+    head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "leads", "clients", "stats", "finance", "traffic"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
-    handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
-  }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] };
+    handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "leads", "clients"] },
+  }[effectiveUser.role] || { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "leads", "clients"] };
   const canSee = (id) => roleMeta.tabs.includes(id);
   const buyingRows = useMemo(() => (stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)), [stats.chatterfy?.attribution, buyingCampaign, buyingSource]);
   const buyingTotals = useMemo(() => buyingRows.reduce((a, x) => ({ leads: a.leads + Number(x.leads || 0), reg: a.reg + Number(x.reg || 0), ftd: a.ftd + Number(x.ftd || 0), ft: a.ft + Number(x.ft || 0), deposits: a.deposits + Number(x.deposits || 0) }), { leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 }), [buyingRows]);
@@ -57,9 +65,13 @@ function App() {
       try {
         const base = import.meta.env.VITE_API_URL || "";
         const response = await fetch(base + "/api/v1/me", {
-          headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+          headers: authHeaders(effectiveUser.username)
         });
-        if (response.ok) setRoleInfo(await response.json());
+        if (response.ok) { setRoleInfo(await response.json()); setAccessError(""); }
+        else {
+          const data = await response.json().catch(() => ({}));
+          setAccessError(data.detail || "CRM access is not granted");
+        }
       } catch (error) {
         console.error(error);
       }
@@ -67,8 +79,8 @@ function App() {
     const loadDashboard = async () => {
       try {
         const base = import.meta.env.VITE_API_URL || "";
-        const response = await fetch(`${base}/api/v1/dashboard`, {
-          headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+        const response = await fetch(`${base}/api/v1/dashboard?days=${period}`, {
+          headers: authHeaders(effectiveUser.username)
         });
         if (!response.ok) return;
         const data = await response.json();
@@ -79,7 +91,7 @@ function App() {
     };
     loadMe();
     loadDashboard();
-  }, [user.username]);
+  }, [user.username, period]);
 
   React.useEffect(() => {
     if (effectiveUser.is_admin) loadTeam();
@@ -87,16 +99,16 @@ function App() {
 
   React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); if (canSee("operations")) loadOperations(); if (canSee("alerts")) loadAlerts(); }, [effectiveUser.username, effectiveUser.role, tab]);
 
-  async function loadTraffic() { if (!canSee("traffic")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/traffic", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setTraffic((await res.json()).rows || []); } catch (error) { console.error(error); } }
+  async function loadTraffic() { if (!canSee("traffic")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/traffic", { headers: authHeaders(effectiveUser.username) }); if (res.ok) setTraffic((await res.json()).rows || []); } catch (error) { console.error(error); } }
 
-  async function loadOperations() { if (!canSee("operations")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/operations", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setOperations(await res.json()); } catch (error) { console.error(error); } }
-  async function loadAlerts() { if (!canSee("alerts")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/alerts", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setAlerts(await res.json()); } catch (error) { console.error(error); } }
-  async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
+  async function loadOperations() { if (!canSee("operations")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/operations", { headers: authHeaders(effectiveUser.username) }); if (res.ok) setOperations(await res.json()); } catch (error) { console.error(error); } }
+  async function loadAlerts() { if (!canSee("alerts")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/alerts", { headers: authHeaders(effectiveUser.username) }); if (res.ok) setAlerts(await res.json()); } catch (error) { console.error(error); } }
+  async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: authHeaders(effectiveUser.username) }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
 
   async function loadTeam() {
     if (!effectiveUser.is_admin) return;
     const base = import.meta.env.VITE_API_URL || "";
-    const res = await fetch(base + "/api/v1/users", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } });
+    const res = await fetch(base + "/api/v1/users", { headers: authHeaders(effectiveUser.username) });
     if (res.ok) setTeam((await res.json()).users || []);
   }
 
@@ -116,7 +128,7 @@ function App() {
       const res = await fetch(base + "/api/v1/users", {
         method: "POST",
         signal: controller.signal,
-        headers: { "Content-Type": "application/json", "X-Telegram-Username": effectiveUser.username || "jokwq" },
+        headers: { "Content-Type": "application/json", ...authHeaders(effectiveUser.username) },
         body: JSON.stringify({ username, role: newRole, active: true })
       });
       clearTimeout(timer);
@@ -136,7 +148,7 @@ function App() {
     const base = import.meta.env.VITE_API_URL || "";
     const res = await fetch(base + "/api/v1/users/" + encodeURIComponent(username), {
       method: "DELETE",
-      headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+      headers: authHeaders(effectiveUser.username)
     });
     if (res.ok) await loadTeam();
   }
@@ -147,14 +159,20 @@ function App() {
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const response = await fetch(`${base}/api/v1/clients/search?q=${encodeURIComponent(query)}`, {
-        headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+        headers: authHeaders(effectiveUser.username)
       });
       if (!response.ok) throw new Error("Search failed");
       const data = await response.json();
-      setClient(data.clients?.[0] || null);
+      const found = data.clients || [];
+      setResults(found);
+      setClient(found.length === 1 ? found[0] : null);
+      setSearched(true);
+      setDebugInfo(null);
     } catch (error) {
       console.error(error);
       setClient(null);
+      setResults([]);
+      setSearched(true);
     } finally {
       setLoading(false);
     }
@@ -166,7 +184,7 @@ function App() {
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const res = await fetch(base + "/api/v1/clients/debug?q=" + encodeURIComponent(client.email), {
-        headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+        headers: authHeaders(effectiveUser.username)
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Debug failed");
@@ -180,10 +198,22 @@ function App() {
     return <button className={tab === id ? "active" : ""} onClick={() => setTab(id)}>{children}</button>;
   }
 
+  if (accessError && !roleInfo) {
+    return (
+      <main className="app">
+        <header><div><p className="eyebrow">BROKER CRM</p><h1>No access</h1></div></header>
+        <section className="card">
+          <h2>{accessError}</h2>
+          <p className="subtitle">{telegramUser?.username ? `You are signed in as @${telegramUser.username}. Ask an admin to add you in the Admin tab.` : "Open the CRM from the Telegram bot. Your Telegram account must have a username."}</p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>Dashboard</h1><p className="subtitle">Client operations · FxPro · Chatterfy · Build 08.10b</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -192,7 +222,11 @@ function App() {
         <strong>{roleMeta.label}</strong>
       </section>
 
-      {effectiveUser.is_admin && <section className="admin-card">
+      {(tab === "dashboard" || tab === "stats") && <div className="period-switch">
+        {[["0", "All time"], ["1", "Today"], ["7", "7 days"], ["30", "30 days"], ["90", "90 days"]].map(([v, label]) => <button key={v} className={period === v ? "selected" : ""} onClick={() => setPeriod(v)}>{label}</button>)}
+      </div>}
+
+      {effectiveUser.is_admin && tab === "dashboard" && <section className="admin-card">
         <p className="eyebrow">ADMIN ACCESS</p>
         <h2>Full CRM access enabled</h2>
         <p>{roleMeta.title} · Clients · Analytics · Team · Settings</p>
@@ -216,7 +250,7 @@ function App() {
               files.forEach(file => form.append("files", file));
               const res = await fetch(`${base}/api/v1/broker/fxpro/import`, {
                 method: "POST", body: form,
-                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+                headers: authHeaders(effectiveUser.username)
               });
               const responseText = await res.text();
               let data;
@@ -227,8 +261,8 @@ function App() {
               }
               if (!res.ok) throw new Error(data.detail || "Import failed");
               setImportMessage(`Imported ${data.client_rows || 0} clients + ${data.account_rows || 0} FxPro accounts · linked by email: ${data.email_linked_clients || 0} clients · ${data.files} reports`);
-              const dashboard = await fetch(`${base}/api/v1/dashboard`, {
-                headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" }
+              const dashboard = await fetch(`${base}/api/v1/dashboard?days=${period}`, {
+                headers: authHeaders(effectiveUser.username)
               });
               if (dashboard.ok) setStats(await dashboard.json());
             } catch (err) {
@@ -294,15 +328,17 @@ function App() {
       {tab === "dashboard" && <section className="search-card">
         <h2>Find client</h2>
         <div className="search">
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Email or Click ID" />
+          <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && search()} placeholder="Email or Click ID" />
           <button onClick={search}>Search</button>
         </div>
       </section>}
 
+      {tab === "leads" && canSee("leads") && <Leads username={effectiveUser.username} role={effectiveUser.role} />}
+
       {tab === "clients" && <section className="search-card">
         <h2>Find client</h2>
         <div className="search">
-          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Email or Click ID" />
+          <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && search()} placeholder="Email or Click ID" />
           <button onClick={search}>Search</button>
         </div>
       </section>}
@@ -338,8 +374,12 @@ function App() {
           {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{member.role.replace("_", " ")}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Active" : "Off"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Disable</button> : null}</span></div>)}
         </div>
       </section>}
-      {loading && <section className="card"><p>Searching...</p></section>}
-      {client && <section className="card">
+      {loading && (tab === "dashboard" || tab === "clients") && <section className="card"><p>Searching...</p></section>}
+      {!loading && results.length > 1 && (tab === "dashboard" || tab === "clients") && <section className="card">
+        <p className="eyebrow">{results.length >= 20 ? "FIRST 20 MATCHES" : results.length + " MATCHES"}</p>
+        <div className="recent-list result-list">{results.map((x, i) => <button key={(x.email || "") + i} className={client === x ? "selected" : ""} onClick={() => { setClient(x); setDebugInfo(null); }}><div><b>{x.email}</b><small>{x.status || "—"} · {x.country || "—"} · {x.campaign || "no campaign"}</small></div><span>{x.events?.at(-1)?.type || "LEAD"}</span></button>)}</div>
+      </section>}
+      {client && (tab === "dashboard" || tab === "clients") && <section className="card">
         <div className="card-title">
           <div><p className="eyebrow">CLIENT</p><h2>{client.email}</h2></div>
           <span className="badge">{client.events?.at(-1)?.type || "LEAD"}</span>
@@ -393,7 +433,7 @@ function App() {
           {(client.events || []).map((event) => <div key={event.type}><b>{event.type}</b><span>{event.date}{event.amount != null ? " · $" + event.amount : ""}</span></div>)}
         </div>
       </section>}
-      {!loading && !client && query && <section className="card"><p>No client found.</p></section>}
+      {!loading && searched && !results.length && (tab === "dashboard" || tab === "clients") && <section className="card"><p>No client found.</p></section>}
 
       {tab === "traffic" && canSee("traffic") && <section className="role-dashboard traffic-dashboard">
         <div className="role-hero"><div><p className="eyebrow">TRAFFIC ANALYTICS · CHATTERFY</p><h2>Traffic performance</h2><p>Campaign → Source → AdSet → Ad → Placement.</p></div><span>◉</span></div>
@@ -441,6 +481,7 @@ function App() {
       </section>}
       <nav>
         <NavButton id="dashboard">Dashboard</NavButton>
+        {canSee("leads") && <NavButton id="leads">Leads</NavButton>}
         <NavButton id="clients">Clients</NavButton>
         {canSee("stats") && <NavButton id="stats">Stats</NavButton>}
         {canSee("finance") && <NavButton id="finance">Finance</NavButton>}
