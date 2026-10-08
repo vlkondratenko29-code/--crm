@@ -256,3 +256,62 @@ nav button.active:after{content:"";position:absolute;left:50%;bottom:3px;transfo
   background:linear-gradient(145deg,#17231a,#101913);
   border-color:#34523a;
 }
+
+/* Navigation: scrollable row so 9 tabs fit on a phone */
+nav{display:flex;overflow-x:auto;scrollbar-width:none;z-index:50}
+nav::-webkit-scrollbar{display:none}
+nav button{flex:1 0 auto;padding:10px 12px}
+
+/* Period switch (dashboard / stats) */
+.period-switch{display:flex;gap:6px;overflow-x:auto;margin:0 0 14px;scrollbar-width:none}
+.period-switch button,.stage-chips button,.work-buttons button{flex:0 0 auto;padding:7px 11px;border-radius:999px;background:#121a25;border:1px solid #293748;color:#9eacbf;font-size:11px;font-weight:700}
+.period-switch button.selected,.stage-chips button.selected{background:#dce6f4;color:#0c121a;border-color:#dce6f4}
+
+/* Search results */
+.result-list{margin-top:8px}
+.result-list>button{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 11px;background:#0d131b;border:1px solid #222d3b;border-radius:11px;font-size:12px}
+.result-list>button>div{display:grid;gap:3px;min-width:0}
+.result-list>button.selected{border-color:#6f86a8}
+
+/* Leads */
+.stage-chips{display:flex;gap:6px;overflow-x:auto;margin-top:15px;position:relative;z-index:1;scrollbar-width:none}
+.stage-chips b{margin-left:4px;opacity:.75}
+.leads-filters{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px;position:relative;z-index:2}
+.leads-filters input{grid-column:1/-1}
+.leads-filters select{min-height:40px;padding:9px 10px;font-size:11px;min-width:0}
+.lead-list{display:grid;gap:7px;position:relative;z-index:1}
+.lead-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;width:100%;text-align:left;padding:11px 12px;background:linear-gradient(145deg,#0b1119,#090e15);border:1px solid #222e3d;border-radius:12px;transition:border-color .18s,transform .18s}
+.lead-row:hover{border-color:#35465b;transform:translateY(-1px)}
+.lead-main{display:grid;gap:3px;min-width:0}
+.lead-main b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lead-main small{color:#8794a7;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lead-side{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.lead-meta{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:10px;color:#6f7d91;font-size:10px}
+.lead-meta span:last-child{margin-left:auto}
+.stage,.work{display:inline-block;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:800;letter-spacing:.04em;border:1px solid #2b3748;background:#131b26;color:#b7c3d4;white-space:nowrap}
+.stage-reg{background:#14202f;border-color:#2c4566;color:#9cc3f5}
+.stage-ftd{background:#142319;border-color:#35543a;color:#a9e0ae}
+.stage-ft{background:#221d33;border-color:#4b3f72;color:#cbb8ff}
+.work{font-weight:700;letter-spacing:0}
+.work-in_progress{color:#ffd58a;border-color:#5a4a2a;background:#211b10}
+.work-callback{color:#8ec5ff;border-color:#2c4566;background:#111c29}
+.work-no_answer{color:#c4a3a3;border-color:#4a3333;background:#1c1313}
+.work-won{color:#a9e0ae;border-color:#35543a;background:#142319}
+.work-lost{color:#8a8f98;border-color:#2e333b;background:#14171c}
+.load-more{width:100%;margin-top:10px;padding:11px;border-radius:11px;background:#121a25;border:1px solid #293748;color:#c6d2e2;font-size:12px;font-weight:700}
+.back-link{color:#8ec5ff;font-size:12px;font-weight:700;margin-bottom:12px;padding:0}
+.work-buttons{display:flex;flex-wrap:wrap;gap:6px}
+.work-buttons button.selected{color:#0c121a;background:#dce6f4;border-color:#dce6f4}
+.work-buttons button:disabled{opacity:.6}
+.assign-row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;font-size:12px;color:#8794a7}
+.assign-row b{color:#e7ebf2}
+.assign-row select{min-height:38px;padding:8px 10px;font-size:12px}
+.assign-row button{padding:8px 14px;border-radius:10px;min-height:38px;border:1px solid #303c4d}
+.note-form{display:flex;gap:8px}
+.note-form button{padding:0 16px;border-radius:12px}
+.note-form button:disabled{opacity:.5}
+.note-list{display:grid;gap:7px;margin-top:9px}
+.note-list>div:not(.empty-state){padding:10px 12px;background:#0d131b;border:1px solid #222d3b;border-radius:11px}
+.note-list p{font-size:13px;white-space:pre-wrap;word-break:break-word}
+.note-list small{display:block;margin-top:5px;color:#6f7d91;font-size:10px}
+@media(max-width:620px){.leads-filters{grid-template-columns:1fr 1fr}}

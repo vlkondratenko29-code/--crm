@@ -1,7 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import csv
+import json
 import os
 import io
+import threading
+import uuid
 
 try:
     import psycopg
@@ -10,16 +13,74 @@ except ImportError:
     psycopg = None
     dict_row = None
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .config import is_admin
+from .auth import validate_init_data
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
 CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
+# Optional shared secret for /webhook/chatterfy. When set, Chatterfy must call
+# the webhook with ?secret=<value> (or the X-Webhook-Secret header).
+CHATTERFY_WEBHOOK_SECRET = os.getenv("CHATTERFY_WEBHOOK_SECRET", "")
+# Bot token from @BotFather. Enables signed Telegram initData authentication.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# Chat (user or group) that receives new FTD/REG notifications.
+TELEGRAM_NOTIFY_CHAT_ID = os.getenv("TELEGRAM_NOTIFY_CHAT_ID", "")
+NOTIFY_EVENTS = {x.strip().upper() for x in os.getenv("NOTIFY_EVENTS", "FTD").split(",") if x.strip()}
+# Legacy username-header auth is only allowed while no bot token is configured,
+# unless explicitly enabled (e.g. for local development).
+ALLOW_USERNAME_HEADER = os.getenv("ALLOW_USERNAME_HEADER", "0" if TELEGRAM_BOT_TOKEN else "1") == "1"
+
+PRIMARY_ADMINS = ("jokwq", "nodari777")
+ROLES = {"admin", "head_buying", "seo", "handler"}
+WORK_STATUSES = ("new", "in_progress", "callback", "no_answer", "won", "lost")
+STAGE_ORDER = {"LEAD": 0, "REG": 1, "FTD": 2, "FT": 3}
+
+
+class _SqliteConn:
+    """Small adapter so the same `%s` SQL runs on SQLite for local development."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @staticmethod
+    def _sql(sql):
+        return sql.replace("%s", "?")
+
+    def execute(self, sql, params=()):
+        return self._conn.execute(self._sql(sql), params)
+
+    def cursor(self):
+        adapter = self
+
+        class _Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def executemany(self, sql, rows):
+                return adapter._conn.executemany(adapter._sql(sql), rows)
+
+            def execute(self, sql, params=()):
+                return adapter.execute(sql, params)
+
+        return _Cursor()
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
+
 
 def db():
     if DATABASE_URL:
@@ -35,82 +96,19 @@ def db():
     import sqlite3
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS broker_clients (
-            email TEXT PRIMARY KEY,
-            broker_id TEXT,
-            status TEXT,
-            country TEXT,
-            click_id TEXT,
-            registration_date TEXT,
-            first_fund_date TEXT,
-            first_fund_amount REAL,
-            first_trade_date TEXT,
-            last_trade_date TEXT,
-            net_deposits REAL,
-            deposits REAL,
-            latest_balance REAL,
-            trading_volume REAL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS fxpro_accounts (
-            login TEXT PRIMARY KEY,
-            email TEXT,
-            name TEXT,
-            country TEXT,
-            jurisdiction TEXT,
-            ib_group TEXT,
-            registration_date TEXT,
-            active TEXT,
-            currency TEXT,
-            usd REAL,
-            deposits REAL,
-            withdrawals REAL,
-            latest_balance REAL,
-            last_trade_date TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS chatterfy_leads (
-            chat_id TEXT PRIMARY KEY,
-            email TEXT,
-            click_id TEXT,
-            last_synced_event TEXT,
-            attribution_json TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_users (
-            username TEXT PRIMARY KEY,
-            role TEXT NOT NULL DEFAULT 'handler',
-            active INTEGER NOT NULL DEFAULT 1
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS crm_events (
-            event_key TEXT PRIMARY KEY,
-            email TEXT,
-            event_type TEXT NOT NULL,
-            event_date TEXT,
-            amount REAL,
-            source TEXT NOT NULL,
-            broker_id TEXT,
-            fxpro_login TEXT,
-            chat_id TEXT,
-            metadata_json TEXT,
-            created_at TEXT
-        )
-    """)
-    for admin_username in ("jokwq", "nodari777"):
-        conn.execute(
-            "INSERT OR IGNORE INTO crm_users(username, role, active) VALUES(?,?,1)",
-            (admin_username, "admin"),
-        )
-    conn.commit()
-    return conn
+    return _SqliteConn(conn)
 
-app = FastAPI(title="Broker CRM API", version="0.5.0")
+
+def add_column(conn, table, column, col_type):
+    if DATABASE_URL:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
+        return
+    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
+app = FastAPI(title="Broker CRM API", version="0.6.0")
 
 def init_db():
     conn = db()
@@ -160,6 +158,8 @@ def init_db():
                 attribution_json TEXT
             )
         """)
+        add_column(conn, "chatterfy_leads", "first_seen_at", "TEXT")
+        add_column(conn, "chatterfy_leads", "updated_at", "TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS crm_users (
                 username TEXT PRIMARY KEY,
@@ -182,7 +182,28 @@ def init_db():
                 created_at TEXT
             )
         """)
-        for admin_username in ("jokwq", "nodari777"):
+        # Handler workflow: who owns a lead and where it is in processing.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lead_work (
+                lead_key TEXT PRIMARY KEY,
+                assignee TEXT,
+                work_status TEXT NOT NULL DEFAULT 'new',
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lead_notes (
+                id TEXT PRIMARY KEY,
+                lead_key TEXT NOT NULL,
+                author TEXT,
+                body TEXT NOT NULL,
+                created_at TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_notes_key ON lead_notes(lead_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_events_email ON crm_events(email)")
+        for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
                 (admin_username, "admin"),
@@ -320,6 +341,13 @@ def parse_fxpro_clients_report(raw: bytes):
                 v = normalized.get(clean_name.replace(" ", "").replace("_", "").replace("-", ""))
             if v not in (None, ""):
                 return v
+        return None
+
+    def email_value(row):
+        found = value(row, "Email", "Email Address", "EmailAddress", "E-mail", "E Mail")
+        if found:
+            return found
+        # Fallback only for the email field: some exports rename the column.
         for v in row.values():
             text = str(v or "").strip()
             if "@" in text and "." in text.split("@")[-1]:
@@ -331,7 +359,9 @@ def parse_fxpro_clients_report(raw: bytes):
         login = str(value(row, "Логин", "Login", "Account", "Account ID") or "").strip()
         if not login:
             continue
-        email = (value(row, "Email", "Email Address", "EmailAddress", "E-mail", "E Mail") or "").strip().lower()
+        if "@" in login:
+            continue  # not an account report row
+        email = (email_value(row) or "").strip().lower()
         if email and "@" not in email:
             email = ""
         deposits = to_float(value(row, "Депозиты", "Deposits"))
@@ -363,8 +393,8 @@ def record_event(conn, *, email, event_type, event_date=None, amount=None, sourc
                  broker_id=None, fxpro_login=None, chat_id=None, metadata=None):
     """Persist a deterministic client event without creating duplicates."""
     if not email or not event_type:
-        return
-    import hashlib, json
+        return False
+    import hashlib
     email_key = email.strip().lower()
     raw_key = "|".join([
         email_key, str(event_type).upper(), str(event_date or ""),
@@ -374,6 +404,7 @@ def record_event(conn, *, email, event_type, event_date=None, amount=None, sourc
     event_key = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
     metadata_json = json.dumps(metadata or {}, ensure_ascii=False)
     now = datetime.utcnow().isoformat()
+    existed = conn.execute("SELECT 1 FROM crm_events WHERE event_key=%s", (event_key,)).fetchone() is not None
     conn.execute("""
         INSERT INTO crm_events
         (event_key,email,event_type,event_date,amount,source,broker_id,fxpro_login,chat_id,metadata_json,created_at)
@@ -385,6 +416,7 @@ def record_event(conn, *, email, event_type, event_date=None, amount=None, sourc
         event_key, email_key, str(event_type).upper(), event_date, amount,
         source, broker_id, fxpro_login, chat_id, metadata_json, now
     ))
+    return not existed
 
 def record_fxpro_client_events(conn, client):
     for event in client.get("events", []):
@@ -471,6 +503,29 @@ def require_admin(username: str, conn=None):
     return user["username"]
 
 
+def current_username(
+    x_telegram_init_data: str = Header(default=""),
+    x_telegram_username: str = Header(default=""),
+):
+    """Resolve the caller from signed Telegram initData.
+
+    The plain X-Telegram-Username header can be forged by anyone, so it is
+    only honoured while TELEGRAM_BOT_TOKEN is not configured (or when
+    ALLOW_USERNAME_HEADER=1 is set explicitly for local development).
+    """
+    if x_telegram_init_data and TELEGRAM_BOT_TOKEN:
+        tg_user = validate_init_data(x_telegram_init_data, TELEGRAM_BOT_TOKEN)
+        if not tg_user:
+            raise HTTPException(status_code=401, detail="Telegram session is invalid or expired. Reopen the Mini App.")
+        username = (tg_user.get("username") or "").strip().lower()
+        if not username:
+            raise HTTPException(status_code=403, detail="Set a Telegram username to use the CRM")
+        return username
+    if ALLOW_USERNAME_HEADER:
+        return x_telegram_username.lstrip("@").strip().lower()
+    raise HTTPException(status_code=401, detail="Open the CRM from Telegram")
+
+
 class TeamUser(BaseModel):
     username: str
     role: str
@@ -478,7 +533,7 @@ class TeamUser(BaseModel):
 
 
 @app.get("/api/v1/users")
-def list_users(x_telegram_username: str = Header(default="")):
+def list_users(x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
@@ -489,7 +544,7 @@ def list_users(x_telegram_username: str = Header(default="")):
 
 
 @app.post("/api/v1/users")
-def upsert_user(payload: TeamUser, x_telegram_username: str = Header(default="")):
+def upsert_user(payload: TeamUser, x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
@@ -509,7 +564,7 @@ def upsert_user(payload: TeamUser, x_telegram_username: str = Header(default="")
 
 
 @app.delete("/api/v1/users/{username}")
-def deactivate_user(username: str, x_telegram_username: str = Header(default="")):
+def deactivate_user(username: str, x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
@@ -524,7 +579,7 @@ def deactivate_user(username: str, x_telegram_username: str = Header(default="")
 
 
 @app.get("/api/v1/me", response_model=UserMe)
-def me(x_telegram_username: str = Header(default="")):
+def me(x_telegram_username: str = Depends(current_username)):
     user = require_access(x_telegram_username)
     return {"username": user["username"], "role": user["role"], "is_admin": user["role"] == "admin"}
 
@@ -550,6 +605,32 @@ def attribution_text(attr, *keys):
     return None
 
 
+def send_telegram_message(chat_id: str, text: str):
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
+        return
+    import urllib.parse
+    import urllib.request
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data=data, timeout=10).read()
+    except Exception as exc:  # never break the webhook because of a notification
+        print(f"Telegram notify failed: {type(exc).__name__}: {exc}")
+
+
+def notify_event(event_type: str, email: str | None, amount: float | None, attr: dict):
+    if not TELEGRAM_NOTIFY_CHAT_ID or not TELEGRAM_BOT_TOKEN:
+        return
+    icon = {"FTD": "💰", "REG": "📝", "FT": "📈"}.get(event_type, "🔔")
+    lines = [f"{icon} New {event_type}" + (f" · ${amount:,.2f}" if amount else "")]
+    if email:
+        lines.append(email)
+    campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign", "campaign_name", "utm_campaign")
+    source = attribution_text(attr, "tracker_source_name", "tracker_source", "utm_source")
+    if campaign or source:
+        lines.append(" · ".join(x for x in (campaign, source) if x))
+    threading.Thread(target=send_telegram_message, args=(TELEGRAM_NOTIFY_CHAT_ID, "\n".join(lines)), daemon=True).start()
+
+
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
 async def chatterfy_webhook(
     request: Request,
@@ -565,8 +646,13 @@ async def chatterfy_webhook(
     adset_name: str | None = None, utm_content: str | None = None, tracker_provider_type: str | None = None,
     tracker_campaign: str | None = None, tracker_source: str | None = None, tracker_domain_id: str | None = None,
     tracker_landing_id: str | None = None, tracker_source_name: str | None = None,
-    tracker_campaign_name: str | None = None
+    tracker_campaign_name: str | None = None, secret: str | None = None
 ):
+    if CHATTERFY_WEBHOOK_SECRET:
+        provided = secret or request.headers.get("x-webhook-secret") or ""
+        import hmac
+        if not hmac.compare_digest(provided, CHATTERFY_WEBHOOK_SECRET):
+            raise HTTPException(status_code=403, detail="Invalid webhook secret")
     attribution = {
         "ad_id": ad_id, "site_source_name": site_source_name, "utm_term": utm_term,
         "tracker_campaign_type": tracker_campaign_type, "utm_id": utm_id, "utm_medium": utm_medium,
@@ -600,29 +686,50 @@ async def chatterfy_webhook(
             pass
     if not chat_id:
         raise HTTPException(status_code=400, detail="chat_id is required")
+    chat_id = str(chat_id)
 
-    import json
     attribution = {k: clean_attribution_value(v) for k, v in attribution.items()}
-    attribution_json = json.dumps({k:v for k,v in attribution.items() if v is not None}, ensure_ascii=False)
+    incoming_attr = {k: v for k, v in attribution.items() if v is not None}
 
     normalized_email = email.strip().lower() if email else None
+    now = datetime.utcnow().isoformat()
+    event_is_new = False
     conn = db()
-    conn.execute(
-        "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json) VALUES(%s,%s,%s,%s) "
-        "ON CONFLICT(chat_id) DO UPDATE SET "
-        "email=COALESCE(excluded.email,chatterfy_leads.email), "
-        "click_id=COALESCE(excluded.click_id,chatterfy_leads.click_id), "
-        "attribution_json=excluded.attribution_json",
-        (chat_id, normalized_email, click_id, attribution_json)
-    )
-    if broker_event:
-        record_event(
-            conn, email=normalized_email, event_type=broker_event, event_date=datereg,
-            amount=to_float(deposit_amount), source="chatterfy", broker_id=broker_id,
-            chat_id=chat_id, metadata={"click_id": click_id}
+    try:
+        # Merge attribution instead of overwriting it: later funnel steps
+        # (e.g. the FTD postback) often arrive without UTM/tracker fields and
+        # must not wipe the attribution captured at the start of the funnel.
+        existing = conn.execute("SELECT attribution_json FROM chatterfy_leads WHERE chat_id=%s", (chat_id,)).fetchone()
+        merged_attr = {}
+        if existing and existing["attribution_json"]:
+            try:
+                merged_attr = json.loads(existing["attribution_json"]) or {}
+            except Exception:
+                merged_attr = {}
+        merged_attr.update(incoming_attr)
+        attribution_json = json.dumps(merged_attr, ensure_ascii=False)
+        conn.execute(
+            "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json,first_seen_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "email=COALESCE(excluded.email,chatterfy_leads.email), "
+            "click_id=COALESCE(excluded.click_id,chatterfy_leads.click_id), "
+            "attribution_json=excluded.attribution_json, "
+            "first_seen_at=COALESCE(chatterfy_leads.first_seen_at,excluded.first_seen_at), "
+            "updated_at=excluded.updated_at",
+            (chat_id, normalized_email, click_id, attribution_json, now, now)
         )
-    conn.commit()
-    conn.close()
+        if broker_event:
+            event_is_new = record_event(
+                conn, email=normalized_email, event_type=broker_event, event_date=datereg,
+                amount=to_float(deposit_amount), source="chatterfy", broker_id=broker_id,
+                chat_id=chat_id, metadata={"click_id": click_id}
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if event_is_new and str(broker_event).upper() in NOTIFY_EVENTS:
+        notify_event(str(broker_event).upper(), normalized_email, to_float(deposit_amount), merged_attr)
 
     return {
         "status": "ok",
@@ -630,12 +737,12 @@ async def chatterfy_webhook(
         "email": normalized_email,
         "chat_id": chat_id,
         "lead_saved": True,
-        "event_saved": bool(broker_event),
+        "event_saved": bool(broker_event) and bool(normalized_email),
     }
 
 
 @app.post("/api/v1/broker/fxpro/import")
-async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_username: str = Header(default="")):
+async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     if user["role"] != "admin":
@@ -705,7 +812,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             )
         """).fetchone()
         email_linked_clients = int(linked_row["c"] or 0)
-        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"accounts_with_email":imported_accounts_with_email,"rows":imported_clients + imported_accounts,"chatterfy_synced":synced,"email_linked_clients":email_linked_clients,"file_types":file_types}
+        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"accounts_with_email":imported_accounts_with_email,"rows":imported_clients + imported_accounts,"chatterfy_synced":0,"email_linked_clients":email_linked_clients,"file_types":file_types}
     except Exception as exc:
         if conn is not None:
             try:
@@ -718,7 +825,7 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             conn.close()
 
 @app.get("/api/v1/clients/search")
-def search_clients(q: str, x_telegram_username: str = Header(default="")):
+def search_clients(q: str, x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
@@ -980,7 +1087,7 @@ def search_clients(q: str, x_telegram_username: str = Header(default="")):
 
 
 @app.get("/api/v1/clients/debug")
-def debug_client_link(q: str, x_telegram_username: str = Header(default="")):
+def debug_client_link(q: str, x_telegram_username: str = Depends(current_username)):
     """Admin-only diagnostic for the client -> Chatterfy -> FxPro link."""
     conn = db()
     try:
@@ -1008,7 +1115,7 @@ def debug_client_link(q: str, x_telegram_username: str = Header(default="")):
 
 
 @app.get("/api/v1/traffic")
-def traffic(x_telegram_username: str = Header(default="")):
+def traffic(x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
@@ -1078,7 +1185,7 @@ def traffic(x_telegram_username: str = Header(default="")):
     }
 
 @app.get("/api/v1/finance")
-def finance(x_telegram_username: str = Header(default="")):
+def finance(x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     if user["role"] not in ("admin", "head_buying"):
@@ -1129,7 +1236,7 @@ def finance(x_telegram_username: str = Header(default="")):
     }
 
 @app.get("/api/v1/operations")
-def operations(x_telegram_username: str = Header(default="")):
+def operations(x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     if user["role"] != "admin":
@@ -1199,7 +1306,7 @@ def operations(x_telegram_username: str = Header(default="")):
 
 
 @app.get("/api/v1/alerts")
-def alerts(x_telegram_username: str = Header(default="")):
+def alerts(x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     if user["role"] not in ("admin", "head_buying", "handler"):
@@ -1242,12 +1349,17 @@ def alerts(x_telegram_username: str = Header(default="")):
 
 # Alerts module
 @app.get("/api/v1/dashboard")
-def dashboard(x_telegram_username: str = Header(default="")):
+def dashboard(days: int = 0, x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
     rows = conn.execute("SELECT * FROM broker_clients ORDER BY registration_date DESC NULLS LAST").fetchall()
     conn.close()
+    # Optional period filter: clients registered within the last N days.
+    cutoff = (datetime.utcnow().date() - timedelta(days=days)).isoformat() if days and days > 0 else None
+    if cutoff:
+        rows = [r for r in rows if (r["registration_date"] or "") >= cutoff]
+    period_emails = {(r["email"] or "").strip().lower() for r in rows}
 
     total = len(rows)
     reg = sum(1 for r in rows if r["registration_date"])
@@ -1290,6 +1402,8 @@ def dashboard(x_telegram_username: str = Header(default="")):
     # attribution and prefer the row with the richest real tracker data.
     best_by_email = {}
     for r in lead_rows:
+        if cutoff and (r["email"] or "").strip().lower() not in period_emails:
+            continue
         try:
             raw_attr = json.loads(r["attribution_json"]) if r["attribution_json"] else {}
         except Exception:
@@ -1394,6 +1508,7 @@ def dashboard(x_telegram_username: str = Header(default="")):
         "ft": ft,
         "deposits": deposits if user["role"] != "seo" else None,
         "viewer": {"username": user["username"], "role": user["role"]},
+        "period_days": days if cutoff else 0,
         "funnel": {
             "reg_to_ftd": round(ftd / reg * 100, 1) if reg else 0,
             "ftd_to_ft": round(ft / ftd * 100, 1) if ftd else 0,
@@ -1425,6 +1540,296 @@ def dashboard(x_telegram_username: str = Header(default="")):
         },
         "recent": recent,
     }
+
+# ---------------------------------------------------------------------------
+# Leads workspace: one row per Chatterfy lead (deduplicated by email), with
+# funnel stage from Chatterfy events and the handler workflow on top.
+# ---------------------------------------------------------------------------
+
+LEAD_ROLES = ("admin", "head_buying", "handler")
+LEAD_MANAGER_ROLES = ("admin", "head_buying")
+
+
+def lead_key_for(email, chat_id):
+    email = (email or "").strip().lower()
+    return email if email else f"chat:{chat_id}"
+
+
+def _load_attr(raw):
+    try:
+        attr = json.loads(raw) if raw else {}
+    except Exception:
+        attr = {}
+    attr = {k: clean_attribution_value(v) for k, v in (attr or {}).items()}
+    return {k: v for k, v in attr.items() if v is not None}
+
+
+def _attr_score(attr):
+    return sum(1 for k in ("tracker_campaign", "tracker_source", "tracker_campaign_name", "tracker_source_name",
+                           "adset_id", "adset_name", "ad_id", "placement", "clickid") if attr.get(k))
+
+
+def build_leads(conn, viewer):
+    """Return every lead as a dict. Small enough to filter in Python."""
+    lead_rows = conn.execute(
+        "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at FROM chatterfy_leads"
+    ).fetchall()
+    event_rows = conn.execute(
+        "SELECT email, event_type, event_date, amount, created_at FROM crm_events WHERE source='chatterfy'"
+    ).fetchall()
+    fx_emails = {
+        (r["email"] or "").strip().lower()
+        for r in conn.execute("SELECT DISTINCT email FROM fxpro_accounts WHERE email IS NOT NULL").fetchall()
+    }
+    fx_emails |= {
+        (r["email"] or "").strip().lower()
+        for r in conn.execute("SELECT email FROM broker_clients").fetchall()
+    }
+    work = {r["lead_key"]: dict(r) for r in conn.execute("SELECT * FROM lead_work").fetchall()}
+    note_counts = {
+        r["lead_key"]: int(r["c"])
+        for r in conn.execute("SELECT lead_key, COUNT(*) AS c FROM lead_notes GROUP BY lead_key").fetchall()
+    }
+
+    events_by_email = {}
+    for ev in event_rows:
+        events_by_email.setdefault((ev["email"] or "").strip().lower(), []).append(ev)
+
+    hide_money = viewer["role"] not in LEAD_MANAGER_ROLES
+    leads = {}
+    for r in lead_rows:
+        key = lead_key_for(r["email"], r["chat_id"])
+        attr = _load_attr(r["attribution_json"])
+        current = leads.get(key)
+        seen = r["first_seen_at"] or attr.get("created_at")
+        if current is None:
+            current = leads[key] = {
+                "lead_key": key,
+                "email": (r["email"] or "").strip().lower() or None,
+                "chat_ids": [],
+                "click_id": None,
+                "attr": {},
+                "first_seen_at": seen,
+                "updated_at": r["updated_at"],
+            }
+        current["chat_ids"].append(str(r["chat_id"]))
+        if _attr_score(attr) >= _attr_score(current["attr"]):
+            current["attr"] = {**current["attr"], **attr}
+        current["click_id"] = current["click_id"] or attribution_text(attr, "clickid") or r["click_id"]
+        if seen and (not current["first_seen_at"] or seen < current["first_seen_at"]):
+            current["first_seen_at"] = seen
+        if r["updated_at"] and (not current["updated_at"] or r["updated_at"] > current["updated_at"]):
+            current["updated_at"] = r["updated_at"]
+
+    result = []
+    for key, item in leads.items():
+        attr = item.pop("attr")
+        evs = events_by_email.get(item["email"] or "", [])
+        stage = "LEAD"
+        ftd_amount = None
+        last_event_at = None
+        for ev in evs:
+            t = str(ev["event_type"] or "").upper()
+            if STAGE_ORDER.get(t, -1) > STAGE_ORDER[stage]:
+                stage = t
+            if t == "FTD" and ev["amount"] is not None:
+                ftd_amount = float(ev["amount"])
+            stamp = ev["created_at"] or ev["event_date"]
+            if stamp and (not last_event_at or stamp > last_event_at):
+                last_event_at = stamp
+        w = work.get(key, {})
+        activity = max(x for x in (item["updated_at"], last_event_at, w.get("updated_at"), item["first_seen_at"], "") if x is not None)
+        result.append({
+            **item,
+            "name": attr.get("name"),
+            "tg_username": attr.get("username"),
+            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign", "campaign_name", "utm_campaign"),
+            "source": attribution_text(attr, "tracker_source_name", "tracker_source", "utm_source"),
+            "chat_link": attr.get("chatlink"),
+            "stage": stage,
+            "ftd_amount": None if hide_money else ftd_amount,
+            "fxpro_linked": bool(item["email"] and item["email"] in fx_emails),
+            "assignee": w.get("assignee"),
+            "work_status": w.get("work_status") or "new",
+            "notes": note_counts.get(key, 0),
+            "last_activity": activity or None,
+        })
+    result.sort(key=lambda x: x["last_activity"] or "", reverse=True)
+    return result
+
+
+def require_lead_access(username, conn):
+    user = require_access(username, conn)
+    if user["role"] not in LEAD_ROLES:
+        raise HTTPException(status_code=403, detail="Leads access required")
+    return user
+
+
+@app.get("/api/v1/leads")
+def list_leads(
+    q: str = "", stage: str = "", work_status: str = "", campaign: str = "",
+    assignee: str = "", days: int = 0, limit: int = 50, offset: int = 0,
+    x_telegram_username: str = Depends(current_username),
+):
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        leads = build_leads(conn, user)
+        team = [
+            dict(r) for r in conn.execute(
+                "SELECT username, role FROM crm_users WHERE active=TRUE AND role IN ('handler','admin','head_buying') ORDER BY username"
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+
+    cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() if days and days > 0 else None
+    needle = q.strip().lower()
+    me = user["username"].lower()
+
+    def match(x, skip=None):
+        if needle and not any(needle in str(v or "").lower() for v in (
+                x["email"], x["click_id"], x["name"], x["tg_username"], x["campaign"], " ".join(x["chat_ids"]))):
+            return False
+        if cutoff and (x["first_seen_at"] or x["last_activity"] or "") < cutoff:
+            return False
+        if campaign and x["campaign"] != campaign:
+            return False
+        if skip != "stage" and stage and x["stage"] != stage.upper():
+            return False
+        if work_status and x["work_status"] != work_status:
+            return False
+        if assignee == "me" and (x["assignee"] or "").lower() != me:
+            return False
+        if assignee == "none" and x["assignee"]:
+            return False
+        if assignee not in ("", "me", "none") and (x["assignee"] or "").lower() != assignee.lower():
+            return False
+        return True
+
+    base = [x for x in leads if match(x, skip="stage")]
+    stage_counts = {s: 0 for s in STAGE_ORDER}
+    for x in base:
+        stage_counts[x["stage"]] += 1
+    filtered = [x for x in base if match(x)]
+    limit = max(1, min(limit, 200))
+    return {
+        "total": len(filtered),
+        "rows": filtered[offset:offset + limit],
+        "stage_counts": stage_counts,
+        "campaigns": sorted({x["campaign"] for x in leads if x["campaign"]}),
+        "team": team,
+        "work_statuses": list(WORK_STATUSES),
+        "can_assign": user["role"] in LEAD_MANAGER_ROLES,
+        "viewer": {"username": user["username"], "role": user["role"]},
+    }
+
+
+@app.get("/api/v1/leads/{lead_key:path}/detail")
+def lead_detail(lead_key: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        lead = next((x for x in build_leads(conn, user) if x["lead_key"] == lead_key), None)
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        notes = conn.execute(
+            "SELECT id, author, body, created_at FROM lead_notes WHERE lead_key=%s ORDER BY created_at DESC",
+            (lead_key,),
+        ).fetchall()
+        events = []
+        if lead["email"]:
+            events = conn.execute(
+                "SELECT event_type, event_date, amount, created_at FROM crm_events WHERE lower(email)=%s AND source='chatterfy' ORDER BY event_date ASC NULLS LAST, created_at ASC",
+                (lead["email"],),
+            ).fetchall()
+    finally:
+        conn.close()
+    hide_money = user["role"] not in LEAD_MANAGER_ROLES
+    lead["events"] = [
+        {"type": e["event_type"], "date": e["event_date"] or e["created_at"], "amount": None if hide_money else e["amount"]}
+        for e in events
+    ]
+    lead["note_list"] = [dict(n) for n in notes]
+    return lead
+
+
+class LeadWorkUpdate(BaseModel):
+    work_status: str | None = None
+    assignee: str | None = None  # "" unassigns
+
+
+@app.post("/api/v1/leads/{lead_key:path}/work")
+def update_lead_work(lead_key: str, payload: LeadWorkUpdate, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        me = user["username"].lower()
+        row = conn.execute("SELECT * FROM lead_work WHERE lead_key=%s", (lead_key,)).fetchone()
+        current = dict(row) if row else {"assignee": None, "work_status": "new"}
+        status = current["work_status"]
+        assignee = current["assignee"]
+
+        if payload.work_status is not None:
+            if payload.work_status not in WORK_STATUSES:
+                raise HTTPException(status_code=400, detail="Invalid work status")
+            if user["role"] not in LEAD_MANAGER_ROLES and assignee and assignee.lower() != me:
+                raise HTTPException(status_code=403, detail=f"Lead is assigned to @{assignee}")
+            status = payload.work_status
+            # Handlers who start working on an unassigned lead take it.
+            if not assignee and user["role"] == "handler":
+                assignee = me
+
+        if payload.assignee is not None:
+            target = payload.assignee.lstrip("@").strip().lower() or None
+            if user["role"] not in LEAD_MANAGER_ROLES:
+                # Handlers may only take a free lead or release their own.
+                allowed = (target == me and not assignee) or (target is None and (assignee or "").lower() == me)
+                if not allowed:
+                    raise HTTPException(status_code=403, detail="Only admins can reassign leads")
+            elif target:
+                exists = conn.execute("SELECT 1 FROM crm_users WHERE lower(username)=%s AND active=TRUE", (target,)).fetchone()
+                if not exists:
+                    raise HTTPException(status_code=400, detail=f"@{target} is not an active CRM user")
+            assignee = target
+
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            "INSERT INTO lead_work(lead_key, assignee, work_status, updated_at, updated_by) VALUES(%s,%s,%s,%s,%s) "
+            "ON CONFLICT(lead_key) DO UPDATE SET assignee=excluded.assignee, work_status=excluded.work_status, "
+            "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+            (lead_key, assignee, status, now, me),
+        )
+        conn.commit()
+        return {"status": "ok", "lead_key": lead_key, "assignee": assignee, "work_status": status}
+    finally:
+        conn.close()
+
+
+class LeadNote(BaseModel):
+    body: str
+
+
+@app.post("/api/v1/leads/{lead_key:path}/notes")
+def add_lead_note(lead_key: str, payload: LeadNote, x_telegram_username: str = Depends(current_username)):
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status_code=400, detail="Note is empty")
+    if len(body) > 2000:
+        raise HTTPException(status_code=400, detail="Note is too long (max 2000 characters)")
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        note = {"id": uuid.uuid4().hex, "author": user["username"], "body": body, "created_at": datetime.utcnow().isoformat()}
+        conn.execute(
+            "INSERT INTO lead_notes(id, lead_key, author, body, created_at) VALUES(%s,%s,%s,%s,%s)",
+            (note["id"], lead_key, note["author"], note["body"], note["created_at"]),
+        )
+        conn.commit()
+        return note
+    finally:
+        conn.close()
+
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
 # API routes are registered above, so this catch-all only handles frontend assets/pages.
