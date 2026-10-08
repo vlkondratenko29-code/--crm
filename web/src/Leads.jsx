@@ -10,7 +10,7 @@ const WORK_LABELS = {
   won: "Done",
   lost: "Lost",
 };
-const MATCH_NAMES = { label: "label", email: "email", phone: "phone" };
+const MATCH_NAMES = { uid: "UID", label: "label", email: "email", phone: "phone" };
 const PERIODS = [["0", "All time"], ["1", "Today"], ["7", "7 days"], ["30", "30 days"]];
 const PAGE = 50;
 
@@ -75,7 +75,7 @@ export default function Leads({ username, role }) {
       </div>
 
       <div className="leads-filters">
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search email, name, Click ID, campaign" />
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search email, name, UID, tag, campaign" />
         <select value={filters.assignee} onChange={set("assignee")}>
           <option value="">Everyone</option>
           <option value="me">Mine</option>
@@ -102,7 +102,7 @@ export default function Leads({ username, role }) {
           <button className="lead-row" key={lead.lead_key} onClick={() => setSelected(lead.lead_key)}>
             <div className="lead-main">
               <b>{leadTitle(lead)}</b>
-              <small>{[lead.campaign, lead.source].filter(Boolean).join(" · ") || "No attribution"}</small>
+              <small>{[lead.campaign, lead.source].filter(Boolean).join(" · ") || "No attribution"}{lead.tags ? " · " + lead.tags : ""}</small>
             </div>
             <div className="lead-side">
               <span className={"stage stage-" + lead.stage.toLowerCase()}>{lead.stage}{lead.ftd_amount != null ? " · $" + Number(lead.ftd_amount).toFixed(0) : ""}</span>
@@ -173,6 +173,8 @@ function LeadCard({ leadKey, username, canAssign, team, onBack }) {
           <span>Click ID</span><b>{lead.click_id || "—"}</b>
           <span>First seen</span><b>{shortDate(lead.first_seen_at)}</b>
           <span>Phone</span><b>{lead.phone || "—"}</b>
+          <span>UID</span><b>{lead.uid || "—"}</b>
+          <span>Tags</span><b>{lead.tags || "—"}</b>
           <span>Broker</span><b>{lead.brokers?.length ? `${lead.brokers.join(", ")} · by ${MATCH_NAMES[lead.broker_match] || lead.broker_match}` : "Not found yet"}</b>
           {lead.ftd_amount != null && <><span>FTD amount</span><b>${Number(lead.ftd_amount).toFixed(2)}</b></>}
         </div>
