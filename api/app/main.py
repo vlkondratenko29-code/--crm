@@ -5,6 +5,7 @@ import os
 import io
 import threading
 import uuid
+import re
 
 try:
     import psycopg
@@ -869,7 +870,8 @@ def parse_chatterfy_export(raw: bytes):
         chat_id = str(row.get(c_id) or "").strip()
         if not chat_id.isdigit():
             continue
-        tags = [t.strip() for t in str(row.get(c_tags) or "").split(",") if t.strip()]
+        raw_tags = str(row.get(c_tags) or "").strip()
+        tags = [t.strip() for t in re.split(r"[,;\n]+", raw_tags) if t.strip()]
 
         def stamp(column):
             value = str(row.get(column) or "").strip() if column else ""
@@ -929,11 +931,11 @@ async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegra
                 else:
                     created += 1
                 # REG / FTD tags set by operators count as funnel events.
-                upper = {t.upper() for t in lead["tags"]}
+                normalized_tags = {re.sub(r"\s+", " ", str(t).strip()).casefold() for t in lead["tags"]}
                 for event_type in ("REG", "FTD", "FT"):
-                    if event_type in upper:
+                    if event_type.casefold() in normalized_tags:
                         if record_event(conn, email=f"chat:{lead['chat_id']}", event_type=event_type, source="chatterfy",
-                                        chat_id=lead["chat_id"], metadata={"from": "export_tag"}):
+                                        chat_id=lead["chat_id"], metadata={"from": "export_tag", "tag": event_type}):
                             events += 1
         conn.commit()
     except HTTPException:
