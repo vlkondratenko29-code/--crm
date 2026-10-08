@@ -13,12 +13,13 @@ except ImportError:
     psycopg = None
     dict_row = None
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, Request
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .auth import validate_init_data
+from . import brokers as broker_lib
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
@@ -160,6 +161,7 @@ def init_db():
         """)
         add_column(conn, "chatterfy_leads", "first_seen_at", "TEXT")
         add_column(conn, "chatterfy_leads", "updated_at", "TEXT")
+        add_column(conn, "chatterfy_leads", "phone", "TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS crm_users (
                 username TEXT PRIMARY KEY,
@@ -203,6 +205,39 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lead_notes_key ON lead_notes(lead_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_crm_events_email ON crm_events(email)")
+        add_column(conn, "fxpro_accounts", "label", "TEXT")
+        add_column(conn, "fxpro_accounts", "phone", "TEXT")
+        # Broker-agnostic account store used for reconciliation with Chatterfy.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS broker_accounts (
+                broker TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                email TEXT,
+                phone TEXT,
+                label TEXT,
+                name TEXT,
+                country TEXT,
+                registration_date TEXT,
+                ftd_date TEXT,
+                ftd_amount DOUBLE PRECISION,
+                deposits DOUBLE PRECISION,
+                withdrawals DOUBLE PRECISION,
+                balance DOUBLE PRECISION,
+                last_trade_date TEXT,
+                imported_at TEXT,
+                PRIMARY KEY (broker, account_id)
+            )
+        """)
+        # Existing FxPro account rows become FxPro broker accounts.
+        conn.execute("""
+            INSERT INTO broker_accounts
+            (broker, account_id, email, phone, label, name, country, registration_date,
+             deposits, withdrawals, balance, last_trade_date, imported_at)
+            SELECT 'FxPro', login, lower(trim(email)), phone, label, name, country, registration_date,
+                   deposits, withdrawals, latest_balance, last_trade_date, NULL
+            FROM fxpro_accounts WHERE TRUE
+            ON CONFLICT(broker, account_id) DO NOTHING
+        """)
         for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -385,6 +420,8 @@ def parse_fxpro_clients_report(raw: bytes):
             "deposits": deposits,
             "withdrawals": withdrawals,
             "latest_balance": to_float(value(row, "Баланс в реальном времени", "Real-time Balance", "Latest Balance")),
+            "label": broker_lib.normalize_label(value(row, "Лейбл", "Label")),
+            "phone": broker_lib.normalize_phone(value(row, "Мобильный телефон", "Mobile Phone", "Phone", "Телефон")),
             "last_trade_date": parse_date(value(row, "Последняя сделка", "Last Trade", "Last Trade Date")),
         })
     return accounts
@@ -646,7 +683,7 @@ async def chatterfy_webhook(
     adset_name: str | None = None, utm_content: str | None = None, tracker_provider_type: str | None = None,
     tracker_campaign: str | None = None, tracker_source: str | None = None, tracker_domain_id: str | None = None,
     tracker_landing_id: str | None = None, tracker_source_name: str | None = None,
-    tracker_campaign_name: str | None = None, secret: str | None = None
+    tracker_campaign_name: str | None = None, secret: str | None = None, phone: str | None = None
 ):
     if CHATTERFY_WEBHOOK_SECRET:
         provided = secret or request.headers.get("x-webhook-secret") or ""
@@ -673,6 +710,7 @@ async def chatterfy_webhook(
             name = name or payload.get("name")
             username = username or payload.get("username")
             chatterfy_id = chatterfy_id or payload.get("chatterfy_id") or payload.get("id")
+            phone = phone or payload.get("phone") or payload.get("phone_number")
             step_key = step_key or payload.get("step_key") or payload.get("stepKey")
             created_at = created_at or payload.get("created_at") or payload.get("createdAt")
             click_id = click_id or payload.get("click_id") or payload.get("clickId")
@@ -709,14 +747,15 @@ async def chatterfy_webhook(
         merged_attr.update(incoming_attr)
         attribution_json = json.dumps(merged_attr, ensure_ascii=False)
         conn.execute(
-            "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json,first_seen_at,updated_at) VALUES(%s,%s,%s,%s,%s,%s) "
+            "INSERT INTO chatterfy_leads(chat_id,email,click_id,attribution_json,first_seen_at,updated_at,phone) VALUES(%s,%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT(chat_id) DO UPDATE SET "
+            "phone=COALESCE(excluded.phone,chatterfy_leads.phone), "
             "email=COALESCE(excluded.email,chatterfy_leads.email), "
             "click_id=COALESCE(excluded.click_id,chatterfy_leads.click_id), "
             "attribution_json=excluded.attribution_json, "
             "first_seen_at=COALESCE(chatterfy_leads.first_seen_at,excluded.first_seen_at), "
             "updated_at=excluded.updated_at",
-            (chat_id, normalized_email, click_id, attribution_json, now, now)
+            (chat_id, normalized_email, click_id, attribution_json, now, now, broker_lib.normalize_phone(phone))
         )
         if broker_event:
             event_is_new = record_event(
@@ -741,6 +780,70 @@ async def chatterfy_webhook(
     }
 
 
+BROKER_ACCOUNT_FIELDS = ("email", "phone", "label", "name", "country", "registration_date", "ftd_date",
+                         "ftd_amount", "deposits", "withdrawals", "balance", "last_trade_date")
+
+
+def canonical_broker(name: str) -> str:
+    name = " ".join(str(name or "").split())[:60]
+    return "FxPro" if name.lower() == "fxpro" else name
+
+
+def upsert_broker_accounts(conn, broker, accounts):
+    """Insert/update broker accounts. Fields missing from a report keep their previous value."""
+    if not accounts:
+        return
+    now = datetime.utcnow().isoformat()
+    cols = ("broker", "account_id") + BROKER_ACCOUNT_FIELDS + ("imported_at",)
+    updates = ",".join(f"{c}=COALESCE(excluded.{c},broker_accounts.{c})" for c in BROKER_ACCOUNT_FIELDS)
+    sql = (f"INSERT INTO broker_accounts ({','.join(cols)}) VALUES ({','.join(['%s'] * len(cols))}) "
+           f"ON CONFLICT(broker, account_id) DO UPDATE SET {updates}, imported_at=excluded.imported_at")
+    rows = [(broker, a["account_id"]) + tuple(a.get(c) for c in BROKER_ACCOUNT_FIELDS) + (now,) for a in accounts]
+    with conn.cursor() as cur:
+        cur.executemany(sql, rows)
+
+
+@app.post("/api/v1/broker/import")
+async def import_broker_report(broker: str = Form(...), files: list[UploadFile] = File(...),
+                               x_telegram_username: str = Depends(current_username)):
+    """Import any broker's CSV export. Columns are detected automatically."""
+    broker = canonical_broker(broker)
+    if not broker:
+        raise HTTPException(status_code=400, detail="Broker name is required")
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        total = []
+        mappings = []
+        for file in files:
+            raw = await file.read()
+            accounts, mapping = broker_lib.parse_broker_report(raw)
+            mappings.append({"file": file.filename, "columns": mapping})
+            upsert_broker_accounts(conn, broker, accounts)
+            total.extend(accounts)
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Import failed: {type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    found = set().union(*[set(m["columns"]) for m in mappings]) if mappings else set()
+    return {
+        "status": "ok",
+        "broker": broker,
+        "files": len(files),
+        "accounts": len(total),
+        "with_label": sum(1 for a in total if a["label"]),
+        "with_email": sum(1 for a in total if a["email"]),
+        "with_phone": sum(1 for a in total if a["phone"]),
+        "with_deposit": sum(1 for a in total if broker_lib.account_has_deposit(a)),
+        "columns": mappings,
+        "missing_keys": [k for k in ("label", "email", "phone") if k not in found],
+    }
+
+
 @app.post("/api/v1/broker/fxpro/import")
 async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_username: str = Depends(current_username)):
     username = x_telegram_username.lstrip("@").strip()
@@ -756,9 +859,9 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT(email) DO UPDATE SET broker_id=excluded.broker_id,status=excluded.status,country=excluded.country,click_id=excluded.click_id,registration_date=excluded.registration_date,first_fund_date=excluded.first_fund_date,first_fund_amount=excluded.first_fund_amount,first_trade_date=excluded.first_trade_date,last_trade_date=excluded.last_trade_date,net_deposits=excluded.net_deposits,deposits=excluded.deposits,latest_balance=excluded.latest_balance,trading_volume=excluded.trading_volume"""
         account_sql = """INSERT INTO fxpro_accounts
-        (login,email,name,country,jurisdiction,ib_group,registration_date,active,currency,usd,deposits,withdrawals,latest_balance,last_trade_date)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT(login) DO UPDATE SET email=excluded.email,name=excluded.name,country=excluded.country,jurisdiction=excluded.jurisdiction,ib_group=excluded.ib_group,registration_date=excluded.registration_date,active=excluded.active,currency=excluded.currency,usd=excluded.usd,deposits=excluded.deposits,withdrawals=excluded.withdrawals,latest_balance=excluded.latest_balance,last_trade_date=excluded.last_trade_date"""
+        (login,email,name,country,jurisdiction,ib_group,registration_date,active,currency,usd,deposits,withdrawals,latest_balance,last_trade_date,label,phone)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT(login) DO UPDATE SET label=excluded.label,phone=excluded.phone,email=excluded.email,name=excluded.name,country=excluded.country,jurisdiction=excluded.jurisdiction,ib_group=excluded.ib_group,registration_date=excluded.registration_date,active=excluded.active,currency=excluded.currency,usd=excluded.usd,deposits=excluded.deposits,withdrawals=excluded.withdrawals,latest_balance=excluded.latest_balance,last_trade_date=excluded.last_trade_date"""
         keys = ("email","broker_id","status","country","click_id","registration_date","first_fund_date","first_fund_amount","first_trade_date","last_trade_date","net_deposits","deposits","latest_balance","trading_volume")
 
         imported_clients = 0
@@ -771,9 +874,16 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             accounts = parse_fxpro_clients_report(raw)
             if accounts:
                 account_values = [
-                    tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date"))
+                    tuple(account.get(k) for k in ("login","email","name","country","jurisdiction","ib_group","registration_date","active","currency","usd","deposits","withdrawals","latest_balance","last_trade_date","label","phone"))
                     for account in accounts
                 ]
+                upsert_broker_accounts(conn, "FxPro", [{
+                    "account_id": a["login"], "email": a.get("email"), "phone": a.get("phone"),
+                    "label": a.get("label"), "name": a.get("name"), "country": a.get("country"),
+                    "registration_date": a.get("registration_date"), "deposits": a.get("deposits"),
+                    "withdrawals": a.get("withdrawals"), "balance": a.get("latest_balance"),
+                    "last_trade_date": a.get("last_trade_date"),
+                } for a in accounts])
                 if account_values:
                     with conn.cursor() as cur:
                         cur.executemany(account_sql, account_values)
@@ -1569,22 +1679,37 @@ def _attr_score(attr):
                            "adset_id", "adset_name", "ad_id", "placement", "clickid") if attr.get(k))
 
 
-def build_leads(conn, viewer):
+def load_broker_accounts(conn, broker=None):
+    """All broker accounts for matching, including FxPro detailed-report clients."""
+    rows = conn.execute("SELECT * FROM broker_accounts").fetchall()
+    accounts = [dict(r) for r in rows]
+    # The FxPro detailed report (broker_clients) carries ClickID and real FTD
+    # date/amount, so it is a first-class source for matching too.
+    for r in conn.execute("SELECT * FROM broker_clients").fetchall():
+        email = broker_lib.normalize_email(r["email"])
+        accounts.append({
+            "broker": "FxPro", "account_id": r["broker_id"] or email, "email": email, "phone": None,
+            "label": broker_lib.normalize_label(r["click_id"]), "name": None, "country": r["country"],
+            "registration_date": r["registration_date"], "ftd_date": r["first_fund_date"],
+            "ftd_amount": r["first_fund_amount"], "deposits": r["deposits"], "withdrawals": None,
+            "balance": r["latest_balance"], "last_trade_date": r["last_trade_date"], "source": "detailed",
+        })
+    if broker:
+        accounts = [a for a in accounts if a["broker"] == broker]
+    return accounts
+
+
+def build_leads(conn, viewer, accounts=None):
     """Return every lead as a dict. Small enough to filter in Python."""
     lead_rows = conn.execute(
-        "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at FROM chatterfy_leads"
+        "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at, phone FROM chatterfy_leads"
     ).fetchall()
     event_rows = conn.execute(
         "SELECT email, event_type, event_date, amount, created_at FROM crm_events WHERE source='chatterfy'"
     ).fetchall()
-    fx_emails = {
-        (r["email"] or "").strip().lower()
-        for r in conn.execute("SELECT DISTINCT email FROM fxpro_accounts WHERE email IS NOT NULL").fetchall()
-    }
-    fx_emails |= {
-        (r["email"] or "").strip().lower()
-        for r in conn.execute("SELECT email FROM broker_clients").fetchall()
-    }
+    if accounts is None:
+        accounts = load_broker_accounts(conn)
+    account_index = broker_lib.build_account_index(accounts)
     work = {r["lead_key"]: dict(r) for r in conn.execute("SELECT * FROM lead_work").fetchall()}
     note_counts = {
         r["lead_key"]: int(r["c"])
@@ -1611,8 +1736,10 @@ def build_leads(conn, viewer):
                 "attr": {},
                 "first_seen_at": seen,
                 "updated_at": r["updated_at"],
+                "phone": None,
             }
         current["chat_ids"].append(str(r["chat_id"]))
+        current["phone"] = current["phone"] or r["phone"] or broker_lib.normalize_phone(attr.get("phone"))
         if _attr_score(attr) >= _attr_score(current["attr"]):
             current["attr"] = {**current["attr"], **attr}
         current["click_id"] = current["click_id"] or attribution_text(attr, "clickid") or r["click_id"]
@@ -1638,6 +1765,8 @@ def build_leads(conn, viewer):
             if stamp and (not last_event_at or stamp > last_event_at):
                 last_event_at = stamp
         w = work.get(key, {})
+        labels = [x for x in [item["click_id"], *item["chat_ids"]] if x]
+        method, matched = broker_lib.match_lead({"labels": labels, "email": item["email"], "phone": item["phone"]}, account_index)
         activity = max(x for x in (item["updated_at"], last_event_at, w.get("updated_at"), item["first_seen_at"], "") if x is not None)
         result.append({
             **item,
@@ -1648,7 +1777,10 @@ def build_leads(conn, viewer):
             "chat_link": attr.get("chatlink"),
             "stage": stage,
             "ftd_amount": None if hide_money else ftd_amount,
-            "fxpro_linked": bool(item["email"] and item["email"] in fx_emails),
+            "fxpro_linked": bool(matched),
+            "broker_match": method,
+            "brokers": sorted({a["broker"] for a in matched}),
+            "matched_accounts": matched,
             "assignee": w.get("assignee"),
             "work_status": w.get("work_status") or "new",
             "notes": note_counts.get(key, 0),
@@ -1713,9 +1845,10 @@ def list_leads(
         stage_counts[x["stage"]] += 1
     filtered = [x for x in base if match(x)]
     limit = max(1, min(limit, 200))
+    page = [{k: v for k, v in x.items() if k != "matched_accounts"} for x in filtered[offset:offset + limit]]
     return {
         "total": len(filtered),
-        "rows": filtered[offset:offset + limit],
+        "rows": page,
         "stage_counts": stage_counts,
         "campaigns": sorted({x["campaign"] for x in leads if x["campaign"]}),
         "team": team,
@@ -1746,12 +1879,133 @@ def lead_detail(lead_key: str, x_telegram_username: str = Depends(current_userna
     finally:
         conn.close()
     hide_money = user["role"] not in LEAD_MANAGER_ROLES
+    matched = lead.pop("matched_accounts", [])
+    lead["broker_accounts"] = [{
+        "broker": a["broker"], "account_id": a["account_id"], "label": a.get("label"),
+        "registration_date": a.get("registration_date"), "ftd_date": a.get("ftd_date"),
+        "deposits": None if hide_money else a.get("deposits"),
+        "balance": None if hide_money else a.get("balance"),
+    } for a in matched]
     lead["events"] = [
         {"type": e["event_type"], "date": e["event_date"] or e["created_at"], "amount": None if hide_money else e["amount"]}
         for e in events
     ]
     lead["note_list"] = [dict(n) for n in notes]
     return lead
+
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation: Chatterfy leads/events vs broker reports
+# ---------------------------------------------------------------------------
+
+RECON_LIMIT = 50
+
+
+def _lead_brief(lead):
+    return {
+        "lead_key": lead["lead_key"], "email": lead["email"], "name": lead.get("name"),
+        "campaign": lead.get("campaign"), "source": lead.get("source"), "stage": lead["stage"],
+        "chatterfy_ftd": lead.get("ftd_amount"), "match": lead.get("broker_match"),
+        "brokers": lead.get("brokers", []),
+    }
+
+
+def _account_brief(a):
+    return {
+        "broker": a["broker"], "account_id": a["account_id"], "email": a.get("email"),
+        "name": a.get("name"), "country": a.get("country"), "label": a.get("label"),
+        "registration_date": a.get("registration_date"), "ftd_date": a.get("ftd_date"),
+        "deposits": a.get("deposits"), "ftd_amount": a.get("ftd_amount"),
+    }
+
+
+def reconcile(leads, accounts):
+    matched_ids = set()
+    by_method = {"label": 0, "email": 0, "phone": 0}
+    ftd_no_deposit, deposit_no_ftd, amount_mismatch, not_found = [], [], [], []
+    for lead in leads:
+        accs = lead.get("matched_accounts") or []
+        for a in accs:
+            matched_ids.add((a["broker"], a["account_id"]))
+        if lead.get("broker_match"):
+            by_method[lead["broker_match"]] += 1
+        has_deposit = any(broker_lib.account_has_deposit(a) for a in accs)
+        stage_rank = STAGE_ORDER.get(lead["stage"], 0)
+        if stage_rank >= STAGE_ORDER["FTD"] and not has_deposit:
+            ftd_no_deposit.append({**_lead_brief(lead), "reason": "not_found" if not accs else "no_deposit"})
+        if accs and has_deposit and stage_rank < STAGE_ORDER["FTD"]:
+            deposit_no_ftd.append({**_lead_brief(lead), "broker_deposits": sum(float(a.get("deposits") or 0) for a in accs)})
+        if stage_rank == STAGE_ORDER["REG"] and not accs:
+            not_found.append(_lead_brief(lead))
+        chat_amount = lead.get("ftd_amount")
+        if chat_amount and accs:
+            ftd_amounts = [float(a["ftd_amount"]) for a in accs if a.get("ftd_amount")]
+            total_deposits = sum(float(a.get("deposits") or 0) for a in accs)
+            broker_amount = ftd_amounts[0] if ftd_amounts else None
+            bad = (abs(broker_amount - chat_amount) > max(1.0, 0.02 * chat_amount)) if broker_amount is not None \
+                else (total_deposits and total_deposits + 1 < chat_amount)
+            if bad:
+                amount_mismatch.append({**_lead_brief(lead), "broker_ftd": broker_amount, "broker_deposits": total_deposits})
+
+    # Group broker rows into clients (one person can have several accounts/rows).
+    clients = {}
+    for a in accounts:
+        key = (a["broker"], broker_lib.normalize_email(a.get("email")) or a["account_id"])
+        clients.setdefault(key, []).append(a)
+    unattributed = []
+    for key, accs in clients.items():
+        if any((a["broker"], a["account_id"]) in matched_ids for a in accs):
+            continue
+        best = max(accs, key=lambda a: float(a.get("deposits") or 0))
+        unattributed.append({**_account_brief(best), "accounts": len(accs),
+                             "deposits": sum(float(a.get("deposits") or 0) for a in accs) or best.get("deposits")})
+    unattributed.sort(key=lambda x: (float(x.get("deposits") or 0), x.get("registration_date") or ""), reverse=True)
+
+    with_label = sum(1 for a in accounts if a.get("label"))
+    return {
+        "counts": {
+            "leads": len(leads),
+            "matched": sum(by_method.values()),
+            "by_label": by_method["label"], "by_email": by_method["email"], "by_phone": by_method["phone"],
+            "broker_clients": len(clients),
+            "unattributed_clients": len(unattributed),
+            "unattributed_with_deposit": sum(1 for x in unattributed if float(x.get("deposits") or 0) > 0),
+            "ftd_no_deposit": len(ftd_no_deposit),
+            "deposit_no_ftd": len(deposit_no_ftd),
+            "amount_mismatch": len(amount_mismatch),
+            "reg_not_found": len(not_found),
+            "label_coverage": round(with_label / len(accounts) * 100, 1) if accounts else 0,
+        },
+        "ftd_no_deposit": ftd_no_deposit[:RECON_LIMIT],
+        "deposit_no_ftd": deposit_no_ftd[:RECON_LIMIT],
+        "amount_mismatch": amount_mismatch[:RECON_LIMIT],
+        "reg_not_found": not_found[:RECON_LIMIT],
+        "unattributed": unattributed[:RECON_LIMIT],
+    }
+
+
+@app.get("/api/v1/reconciliation")
+def reconciliation(broker: str = "", x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Reconciliation access required")
+        all_accounts = load_broker_accounts(conn)
+        brokers = sorted({a["broker"] for a in all_accounts} | {"FxPro"})
+        accounts = [a for a in all_accounts if a["broker"] == broker] if broker else all_accounts
+        leads = build_leads(conn, user, accounts=accounts)
+        last_import = conn.execute(
+            "SELECT broker, MAX(imported_at) AS at FROM broker_accounts GROUP BY broker"
+        ).fetchall()
+    finally:
+        conn.close()
+    result = reconcile(leads, accounts)
+    result["brokers"] = brokers
+    result["broker"] = broker
+    result["last_import"] = {r["broker"]: r["at"] for r in last_import}
+    return result
 
 
 class LeadWorkUpdate(BaseModel):
