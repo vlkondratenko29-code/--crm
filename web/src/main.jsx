@@ -26,6 +26,7 @@ function App() {
   const [finance, setFinance] = useState(null);
   const [traffic, setTraffic] = useState([]);
   const [operations, setOperations] = useState(null);
+  const [alerts, setAlerts] = useState(null);
   const [trafficCampaign, setTrafficCampaign] = useState("all");
   const [trafficSource, setTrafficSource] = useState("all");
   const [tab, setTab] = useState("dashboard");
@@ -40,7 +41,7 @@ function App() {
   const actualUser = roleInfo ? { ...user, ...roleInfo, is_admin: roleInfo.role === "admin" } : user;
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   const roleMeta = {
-    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "operations", "admin"] },
+    admin: { label: "ADMIN", title: "Full CRM access", tabs: ["dashboard", "clients", "stats", "finance", "traffic", "operations", "alerts", "admin"] },
     head_buying: { label: "HEAD BUYING", title: "Buying & performance", tabs: ["dashboard", "clients", "stats", "finance", "traffic"] },
     seo: { label: "SEO", title: "Traffic & funnel", tabs: ["dashboard", "clients", "stats"] },
     handler: { label: "HANDLER", title: "Client operations", tabs: ["dashboard", "clients"] },
@@ -84,11 +85,12 @@ function App() {
     if (effectiveUser.is_admin) loadTeam();
   }, [effectiveUser.username, effectiveUser.is_admin]);
 
-  React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); if (canSee("operations")) loadOperations(); }, [effectiveUser.username, effectiveUser.role, tab]);
+  React.useEffect(() => { if (canSee("finance")) loadFinance(); if (canSee("traffic")) loadTraffic(); if (canSee("operations")) loadOperations(); if (canSee("alerts")) loadAlerts(); }, [effectiveUser.username, effectiveUser.role, tab]);
 
   async function loadTraffic() { if (!canSee("traffic")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/traffic", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setTraffic((await res.json()).rows || []); } catch (error) { console.error(error); } }
 
   async function loadOperations() { if (!canSee("operations")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/operations", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setOperations(await res.json()); } catch (error) { console.error(error); } }
+  async function loadAlerts() { if (!canSee("alerts")) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/alerts", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setAlerts(await res.json()); } catch (error) { console.error(error); } }
   async function loadFinance() { if (!["admin", "head_buying"].includes(effectiveUser.role)) return; try { const base = import.meta.env.VITE_API_URL || ""; const res = await fetch(base + "/api/v1/finance", { headers: { "X-Telegram-Username": effectiveUser.username || "jokwq" } }); if (res.ok) setFinance(await res.json()); } catch (error) { console.error(error); } }
 
   async function loadTeam() {
@@ -409,6 +411,20 @@ function App() {
         <div className="section-title">Latest broker events</div>
         <div className="recent-list">{(operations?.events || []).map((x,i) => <div key={x.email + "-" + x.event_type + "-" + i}><div><b>{x.event_type} · {x.email}</b><small>{x.source || "—"} · {x.broker_id || "—"}</small></div><span>{x.event_date || x.created_at || "—"}</span></div>)}{!(operations?.events || []).length && <div className="empty-state">No broker events received yet.</div>}</div>
       </section>}
+      {tab === "alerts" && canSee("alerts") && <section className="role-dashboard analytics-dashboard">
+        <div className="role-hero"><div><p className="eyebrow">ALERTS</p><h2>What needs attention</h2><p>Operational issues detected from Chatterfy and broker events.</p></div><span>⚠️</span></div>
+        <div className="ops-grid">
+          <div><span>Waiting for FxPro</span><b>{alerts?.counts?.pending_fxpro ?? 0}</b></div>
+          <div><span>Missing attribution</span><b>{alerts?.counts?.missing_attribution ?? 0}</b></div>
+          <div><span>Unlinked events</span><b>{alerts?.counts?.unlinked_events ?? 0}</b></div>
+          <div><span>FTD without amount</span><b>{alerts?.counts?.ftd_missing_amount ?? 0}</b></div>
+          <div><span>Chatterfy events</span><b>{alerts?.counts?.broker_events ?? 0}</b></div>
+        </div>
+        <div className="section-title">Leads waiting for FxPro</div>
+        <div className="recent-list">{(alerts?.pending_fxpro || []).map((x,i) => <div key={x.email + "-" + i}><div><b>{x.email}</b><small>{x.campaign || "—"} · {x.source || "—"}</small></div><span>{x.click_id || "No Click ID"}</span></div>)}{!(alerts?.pending_fxpro || []).length && <div className="empty-state">No pending FxPro links.</div>}</div>
+        <div className="section-title">Events with problems</div>
+        <div className="recent-list">{(alerts?.unlinked_events || []).slice(0,10).map((x,i) => <div key={x.email + "-unlinked-" + i}><div><b>{x.event_type} · {x.email}</b><small>Chatterfy event not linked to FxPro account</small></div><span>{x.event_date || x.created_at || "—"}</span></div>)}{(alerts?.ftd_missing_amount || []).slice(0,10).map((x,i) => <div key={x.email + "-amount-" + i}><div><b>FTD · {x.email}</b><small>Missing deposit amount</small></div><span>{x.event_date || x.created_at || "—"}</span></div>)}{!(alerts?.unlinked_events || []).length && !(alerts?.ftd_missing_amount || []).length && <div className="empty-state">No event problems detected.</div>}</div>
+      </section>}
       {tab === "finance" && canSee("finance") && <section className="role-dashboard finance-dashboard">
         <div className="role-hero"><div><p className="eyebrow">FINANCE · FXPRO</p><h2>Deposits & cash flow</h2><p>Account-level financial performance from the latest FxPro report.</p></div><span>💰</span></div>
         <div className="exec-kpis">
@@ -426,6 +442,7 @@ function App() {
         {canSee("finance") && <NavButton id="finance">Finance</NavButton>}
         {canSee("traffic") && <NavButton id="traffic">Traffic</NavButton>}
         {canSee("operations") && <NavButton id="operations">Operations</NavButton>}
+        {canSee("alerts") && <NavButton id="alerts">Alerts</NavButton>}
         {effectiveUser.is_admin && <NavButton id="admin">Admin</NavButton>}
       </nav>
     </main>
