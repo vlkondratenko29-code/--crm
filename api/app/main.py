@@ -1049,7 +1049,12 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
     username = x_telegram_username.lstrip("@").strip()
     user = require_access(username)
     conn = db()
-    term = "%" + q.strip().lower() + "%"
+    needle = q.strip().lstrip("@").strip().lower()
+    if not needle:
+        conn.close()
+        return {"clients": []}
+    term = "%" + needle + "%"
+    digits = re.sub(r"\D", "", needle)
 
     rows = conn.execute("""
         SELECT b.*, l.attribution_json AS chatterfy_attribution_json, l.click_id AS chatterfy_click_id
@@ -1074,13 +1079,10 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
     # This keeps a newly registered/FTD lead visible in CRM instead of returning
     # "client not found" simply because the broker report does not contain them.
     chatterfy_rows = conn.execute("""
-        SELECT chat_id, email, click_id, attribution_json
+        SELECT chat_id, email, click_id, attribution_json, uid, phone
         FROM chatterfy_leads
-        WHERE lower(coalesce(email,'')) LIKE %s
-           OR lower(coalesce(click_id,'')) LIKE %s
         ORDER BY chat_id DESC
-        LIMIT 100
-    """, (term, term)).fetchall()
+    """).fetchall()
 
     # Pull Chatterfy attribution for the full-report-only accounts in one query.
     account_emails = sorted({(a["email"] or "").strip().lower() for a in account_rows if a["email"]})
@@ -1193,20 +1195,42 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
     # report, synthesize a lead-only client card. When FxPro appears later,
     # the same Email will naturally resolve to the broker-backed card above.
     account_email_set = {(a["email"] or "").strip().lower() for a in account_rows if a["email"]}
+    lead_extra_by_email = {}
     for lead in chatterfy_rows:
         email_key = (lead["email"] or "").strip().lower()
-        # If FxPro has this email, let the account-backed card below win so
-        # the CRM shows the real FxPro login(s) instead of a lead-only card.
-        if not email_key or email_key in seen_emails or email_key in account_email_set:
-            continue
         try:
             attr = json.loads(lead["attribution_json"]) if lead["attribution_json"] else {}
         except Exception:
             attr = {}
         attr = {k: clean_attribution_value(v) for k, v in attr.items()}
         attr = {k: v for k, v in attr.items() if v is not None}
+        # A JSON hit only counts when it is in the name / username, not in
+        # some unrelated tracker field.
+        folded = fold_text(needle)
+        direct_hit = any(folded in fold_text(v) for v in (
+            lead["email"], lead["click_id"], lead["uid"], lead["chat_id"], attr.get("name"), attr.get("username")))
+        if not direct_hit and not (len(digits) >= 5 and digits in re.sub(r"\D", "", str(lead["phone"] or ""))):
+            continue
+        lead_extra = {
+            "lead_key": lead_key_for(email_key, lead["chat_id"]),
+            "name": attr.get("name"),
+            "tg_username": attr.get("username"),
+            "uid": lead["uid"],
+            "phone": lead["phone"],
+        }
+        # If FxPro has this email, let the account-backed card below win so
+        # the CRM shows the real FxPro login(s) instead of a lead-only card.
+        if email_key:
+            lead_extra_by_email.setdefault(email_key, lead_extra)
+        if email_key and (email_key in seen_emails or email_key in account_email_set):
+            lead_by_email.setdefault(email_key, lead)
+            continue
+        seen_key = email_key or lead_extra["lead_key"]
+        if seen_key in seen_emails:
+            continue
         item = {
-            "email": email_key,
+            **lead_extra,
+            "email": email_key or None,
             "broker_id": None,
             "status": "Chatterfy lead",
             "country": None,
@@ -1229,10 +1253,10 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
             "ad": attribution_text(attr, "ad_id"),
             "placement": attribution_text(attr, "placement"),
             "chat_link": attr.get("chatlink"),
-            "events": events_for_email(email_key),
+            "events": events_for_email(email_key if email_key else f"chat:{lead['chat_id']}"),
         }
         result.append(item)
-        seen_emails.add(email_key)
+        seen_emails.add(seen_key)
 
     # If a client exists only in the full FxPro report, synthesize a client card
     # from all accounts sharing that Email. This handles multiple FxPro logins
@@ -1303,6 +1327,13 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
         result.append(item)
 
     conn.close()
+    # Give every card the Chatterfy identity (name, @username, UID, lead card link) when known.
+    for item in result:
+        extra = lead_extra_by_email.get((item.get("email") or "").strip().lower())
+        if extra:
+            for k, v in extra.items():
+                if item.get(k) is None:
+                    item[k] = v
     return {"clients": result[:20]}
 
 
@@ -1878,6 +1909,35 @@ def build_leads(conn, viewer, accounts=None):
     return result
 
 
+def _digits(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+
+_FOLD = str.maketrans({"ş": "s", "ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ü": "u", "â": "a", "î": "i", "û": "u"})
+
+
+def fold_text(value):
+    """Lowercase and drop Turkish diacritics so "ayse" finds "Ayşe" and "celik" finds "Çelik"."""
+    return str(value or "").replace("İ", "i").replace("I", "ı").lower().translate(_FOLD)
+
+
+def lead_matches(x, needle):
+    """Free-text lead search: email, name, @username, UID, phone, Click ID, chat id, tags, campaign."""
+    if not needle:
+        return True
+    needle = fold_text(needle)
+    hay = (x.get("email"), x.get("click_id"), x.get("name"), x.get("tg_username"), x.get("campaign"),
+           " ".join(x.get("chat_ids") or []), x.get("uid"), x.get("tags"), x.get("phone"))
+    if any(needle in fold_text(v) for v in hay):
+        return True
+    digits = _digits(needle)
+    return len(digits) >= 5 and digits in _digits(x.get("phone"))
+
+
+def _lead_row(x):
+    return {k: v for k, v in x.items() if k != "matched_accounts"}
+
+
 def require_lead_access(username, conn):
     user = require_access(username, conn)
     if user["role"] not in LEAD_ROLES:
@@ -1904,13 +1964,11 @@ def list_leads(
         conn.close()
 
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat() if days and days > 0 else None
-    needle = q.strip().lower()
+    needle = q.strip().lstrip("@").lower()
     me = user["username"].lower()
 
     def match(x, skip=None):
-        if needle and not any(needle in str(v or "").lower() for v in (
-                x["email"], x["click_id"], x["name"], x["tg_username"], x["campaign"], " ".join(x["chat_ids"]),
-                x.get("uid"), x.get("tags"))):
+        if needle and not lead_matches(x, needle):
             return False
         if cutoff and (x["first_seen_at"] or x["last_activity"] or "") < cutoff:
             return False
@@ -1944,6 +2002,63 @@ def list_leads(
         "work_statuses": list(WORK_STATUSES),
         "can_assign": user["role"] in LEAD_MANAGER_ROLES,
         "viewer": {"username": user["username"], "role": user["role"]},
+    }
+
+
+@app.get("/api/v1/leads/today")
+def leads_today(x_telegram_username: str = Depends(current_username)):
+    """Handler's to-do list: own leads grouped by what to do next, plus free leads to take."""
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        leads = build_leads(conn, user)
+    finally:
+        conn.close()
+
+    me = user["username"].lower()
+    now = datetime.utcnow()
+    today = now.date().isoformat()
+    stale_before = (now - timedelta(hours=48)).isoformat()
+    closed = ("won", "lost")
+
+    mine = [x for x in leads if (x["assignee"] or "").lower() == me]
+    buckets = {"callback": [], "reg_no_ftd": [], "no_answer": [], "stale": [], "active": []}
+    for x in mine:
+        if x["work_status"] in closed or x["stage"] in ("FTD", "FT"):
+            continue
+        if x["work_status"] == "callback":
+            buckets["callback"].append(x)
+        elif x["stage"] == "REG":
+            buckets["reg_no_ftd"].append(x)
+        elif x["work_status"] == "no_answer":
+            buckets["no_answer"].append(x)
+        elif (x["last_activity"] or "") < stale_before:
+            buckets["stale"].append(x)
+        else:
+            buckets["active"].append(x)
+
+    free = [x for x in leads if not x["assignee"] and x["work_status"] == "new" and x["stage"] in ("LEAD", "REG")]
+    free.sort(key=lambda x: x["first_seen_at"] or x["last_activity"] or "", reverse=True)
+
+    def take(rows, n=30):
+        return {"count": len(rows), "rows": [_lead_row(x) for x in rows[:n]]}
+
+    return {
+        "viewer": {"username": user["username"], "role": user["role"]},
+        "stats": {
+            "mine": len(mine),
+            "in_work": sum(len(v) for v in buckets.values()),
+            "mine_reg": sum(1 for x in mine if x["stage"] == "REG"),
+            "mine_ftd": sum(1 for x in mine if x["stage"] in ("FTD", "FT")),
+            "new_today": sum(1 for x in leads if (x["first_seen_at"] or "")[:10] == today),
+            "free": len(free),
+        },
+        "callback": take(buckets["callback"]),
+        "reg_no_ftd": take(buckets["reg_no_ftd"]),
+        "no_answer": take(buckets["no_answer"]),
+        "stale": take(buckets["stale"]),
+        "active": take(buckets["active"]),
+        "free": take(free, 15),
     }
 
 
