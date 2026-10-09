@@ -4,7 +4,7 @@ import "./styles.css";
 import { authHeaders } from "./api.js";
 import Leads, { LeadCard } from "./Leads.jsx";
 import MyDay from "./MyDay.jsx";
-import Reconcile from "./Reconcile.jsx";
+import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
 // Outside Telegram (plain browser) there is no signed user. The demo admin is
@@ -267,7 +267,7 @@ function App() {
                 throw new Error(responseText.replace(/<[^>]*>/g, " ").replace(/\\s+/g, " ").trim().slice(0, 300) || `Ошибка загрузки (HTTP ${res.status})`);
               }
               if (!res.ok) throw new Error(data.detail || "Ошибка загрузки");
-              setImportMessage(`Загружено клиентов: ${data.client_rows || 0}, счетов FxPro: ${data.account_rows || 0} · связано по email: ${data.email_linked_clients || 0} · файлов: ${data.files}`);
+              setImportMessage(`Загружено клиентов: ${data.client_rows || 0}, счетов FxPro: ${data.account_rows || 0} · связано по email: ${data.email_linked_clients || 0} · файлов: ${data.files}` + (data.chatterfy_push ? " · " + pushSummary(data.chatterfy_push) : ""));
               const dashboard = await fetch(`${base}/api/v1/dashboard?days=${period}`, {
                 headers: authHeaders(effectiveUser.username)
               });
