@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import csv
 import json
 import os
@@ -262,6 +262,19 @@ def init_db():
                 PRIMARY KEY (lead_key, event)
             )
         """)
+        # Personal Telegram notifications: user chat id, callback reminders, stage notices.
+        add_column(conn, "crm_users", "tg_id", "TEXT")
+        add_column(conn, "lead_work", "callback_at", "TEXT")
+        add_column(conn, "lead_work", "callback_notified_at", "TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS handler_notices (
+                lead_key TEXT NOT NULL,
+                event TEXT NOT NULL,
+                assignee TEXT,
+                sent_at TEXT,
+                PRIMARY KEY (lead_key, event)
+            )
+        """)
         for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -292,6 +305,7 @@ class UserMe(BaseModel):
     username: str
     role: str
     is_admin: bool
+    notify_ready: bool = False
 
 
 def parse_date(value: str | None):
@@ -581,6 +595,7 @@ def current_username(
         username = (tg_user.get("username") or "").strip().lower()
         if not username:
             raise HTTPException(status_code=403, detail="Set a Telegram username to use the CRM")
+        remember_tg_id(username, tg_user.get("id"))
         return username
     if ALLOW_USERNAME_HEADER:
         return x_telegram_username.lstrip("@").strip().lower()
@@ -641,8 +656,14 @@ def deactivate_user(username: str, x_telegram_username: str = Depends(current_us
 
 @app.get("/api/v1/me", response_model=UserMe)
 def me(x_telegram_username: str = Depends(current_username)):
-    user = require_access(x_telegram_username)
-    return {"username": user["username"], "role": user["role"], "is_admin": user["role"] == "admin"}
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        row = conn.execute("SELECT tg_id FROM crm_users WHERE lower(username)=%s", (user["username"].lower(),)).fetchone()
+    finally:
+        conn.close()
+    return {"username": user["username"], "role": user["role"], "is_admin": user["role"] == "admin",
+            "notify_ready": bool(row and row["tg_id"] and TELEGRAM_BOT_TOKEN)}
 
 
 @app.get("/health")
@@ -691,6 +712,178 @@ def notify_event(event_type: str, email: str | None, amount: float | None, attr:
     if campaign or source:
         lines.append(" · ".join(x for x in (campaign, source) if x))
     threading.Thread(target=send_telegram_message, args=(TELEGRAM_NOTIFY_CHAT_ID, "\n".join(lines)), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# Personal notifications to CRM users in Telegram
+# ---------------------------------------------------------------------------
+
+_known_tg_ids = {}
+
+
+def remember_tg_id(username, tg_id):
+    """Store the Telegram user id of whoever opens the Mini App, so the bot can message them."""
+    if not tg_id:
+        return
+    tg_id = str(tg_id)
+    if _known_tg_ids.get(username) == tg_id:
+        return
+    try:
+        conn = db()
+        try:
+            conn.execute("UPDATE crm_users SET tg_id=%s WHERE lower(username)=%s", (tg_id, username))
+            conn.commit()
+        finally:
+            conn.close()
+        _known_tg_ids[username] = tg_id
+    except Exception as exc:
+        print(f"remember_tg_id failed: {type(exc).__name__}: {exc}")
+
+
+def send_telegram_checked(chat_id, text):
+    """Send a message and return (ok, error) so callers can report delivery problems."""
+    if not TELEGRAM_BOT_TOKEN:
+        return False, "TELEGRAM_BOT_TOKEN is not set"
+    if not chat_id:
+        return False, "no chat id"
+    import json as _json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}).encode()
+    try:
+        urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data=data, timeout=10).read()
+        return True, None
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = _json.loads(exc.read().decode()).get("description")
+        except Exception:
+            detail = None
+        return False, detail or f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def user_tg_id(conn, username):
+    row = conn.execute("SELECT tg_id FROM crm_users WHERE lower(username)=%s AND active=TRUE",
+                       ((username or "").lower(),)).fetchone()
+    return row["tg_id"] if row else None
+
+
+def notify_user(conn, username, text):
+    """Fire-and-forget personal message; silently skipped if the user never opened the Mini App."""
+    chat_id = user_tg_id(conn, username)
+    if chat_id and TELEGRAM_BOT_TOKEN:
+        threading.Thread(target=send_telegram_message, args=(chat_id, text), daemon=True).start()
+        return True
+    return False
+
+
+def lead_label(lead):
+    name = lead.get("name") or ""
+    user = ("@" + lead["tg_username"]) if lead.get("tg_username") else ""
+    return " ".join(x for x in (name, user) if x) or lead.get("email") or lead.get("lead_key")
+
+
+HANDLER_NOTICES_SEEDED = "handler_notices_seeded"
+
+
+def run_stage_notices(conn):
+    """Tell each handler when their lead registers or deposits (from Chatterfy or the broker report).
+
+    The first run only records what already happened, so nobody gets a flood of old events.
+    """
+    leads = build_leads(conn, {"role": "admin", "username": "system"})
+    done = {(r["lead_key"], r["event"]) for r in conn.execute("SELECT lead_key, event FROM handler_notices").fetchall()}
+    seeding = get_setting(conn, HANDLER_NOTICES_SEEDED) != "1"
+    now = datetime.utcnow().isoformat()
+    sent = 0
+    for x in leads:
+        accs = x.get("matched_accounts") or []
+        rank = STAGE_ORDER.get(x["stage"], 0)
+        events = []
+        if rank >= STAGE_ORDER["REG"] or accs:
+            events.append("REG")
+        if rank >= STAGE_ORDER["FTD"] or any(broker_lib.account_has_deposit(a) for a in accs):
+            events.append("FTD")
+        for ev in events:
+            if (x["lead_key"], ev) in done:
+                continue
+            conn.execute(
+                "INSERT INTO handler_notices(lead_key, event, assignee, sent_at) VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (x["lead_key"], ev, x.get("assignee"), now),
+            )
+            done.add((x["lead_key"], ev))
+            if seeding or not x.get("assignee"):
+                continue
+            text = (f"💰 Твой клиент внёс депозит: {lead_label(x)}" if ev == "FTD"
+                    else f"📝 Твой клиент зарегистрировался: {lead_label(x)}\nДожми до первого депозита.")
+            if notify_user(conn, x["assignee"], text):
+                sent += 1
+    if seeding:
+        set_setting(conn, HANDLER_NOTICES_SEEDED, "1", "system")
+    conn.commit()
+    return sent
+
+
+def run_callback_reminders(conn):
+    now = datetime.utcnow().isoformat()
+    rows = conn.execute(
+        "SELECT lead_key, assignee, callback_at FROM lead_work WHERE work_status='callback' AND callback_at IS NOT NULL "
+        "AND callback_at <= %s AND (callback_notified_at IS NULL OR callback_notified_at < callback_at)",
+        (now,),
+    ).fetchall()
+    if not rows:
+        return 0
+    leads = {x["lead_key"]: x for x in build_leads(conn, {"role": "admin", "username": "system"})}
+    sent = 0
+    for r in rows:
+        conn.execute("UPDATE lead_work SET callback_notified_at=%s WHERE lead_key=%s", (now, r["lead_key"]))
+        lead = leads.get(r["lead_key"]) or {"lead_key": r["lead_key"]}
+        if r["assignee"] and notify_user(conn, r["assignee"], f"⏰ Пора связаться с клиентом: {lead_label(lead)}\nТы ставил «Перезвонить» на это время."):
+            sent += 1
+    conn.commit()
+    return sent
+
+
+NOTIFY_LOOP_SECONDS = int(os.getenv("NOTIFY_LOOP_SECONDS", "120"))
+
+
+def _notify_loop():
+    import time
+    time.sleep(20)
+    while True:
+        try:
+            conn = db()
+            try:
+                run_callback_reminders(conn)
+                run_stage_notices(conn)
+            finally:
+                conn.close()
+        except Exception as exc:
+            print(f"notify loop error: {type(exc).__name__}: {exc}")
+        time.sleep(NOTIFY_LOOP_SECONDS)
+
+
+if TELEGRAM_BOT_TOKEN and os.getenv("DISABLE_NOTIFY_LOOP", "0") != "1":
+    threading.Thread(target=_notify_loop, daemon=True).start()
+
+
+@app.post("/api/v1/notify/test")
+def notify_test(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        chat_id = user_tg_id(conn, user["username"])
+    finally:
+        conn.close()
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Открой мини-апп из Telegram, чтобы CRM узнала твой аккаунт")
+    ok, err = send_telegram_checked(chat_id, "✅ Уведомления CRM работают. Сюда будут приходить новые лиды, регистрации, депозиты и напоминания.")
+    if not ok:
+        hint = "Открой бота и нажми Start (или напиши ему любое сообщение), потом проверь ещё раз." if err and ("chat not found" in err or "blocked" in err or "initiate" in err) else err
+        raise HTTPException(status_code=400, detail=f"Не удалось отправить: {hint}")
+    return {"status": "ok"}
 
 
 @app.api_route("/webhook/chatterfy", methods=["GET", "POST"])
@@ -1929,6 +2122,7 @@ def build_leads(conn, viewer, accounts=None):
             "matched_accounts": matched,
             "assignee": w.get("assignee"),
             "work_status": w.get("work_status") or "new",
+            "callback_at": w.get("callback_at"),
             "notes": note_counts.get(key, 0),
             "last_activity": activity or None,
         })
@@ -2064,6 +2258,7 @@ def leads_today(x_telegram_username: str = Depends(current_username)):
         else:
             buckets["active"].append(x)
 
+    buckets["callback"].sort(key=lambda x: x.get("callback_at") or "9999")
     free = [x for x in leads if not x["assignee"] and x["work_status"] == "new" and x["stage"] in ("LEAD", "REG")]
     free.sort(key=lambda x: x["first_seen_at"] or x["last_activity"] or "", reverse=True)
 
@@ -2409,6 +2604,7 @@ def push_to_chatterfy(dry_run: bool = False, x_telegram_username: str = Depends(
 class LeadWorkUpdate(BaseModel):
     work_status: str | None = None
     assignee: str | None = None  # "" unassigns
+    callback_at: str | None = None  # ISO UTC; "" clears
 
 
 @app.post("/api/v1/leads/{lead_key:path}/work")
@@ -2445,15 +2641,39 @@ def update_lead_work(lead_key: str, payload: LeadWorkUpdate, x_telegram_username
                     raise HTTPException(status_code=400, detail=f"@{target} is not an active CRM user")
             assignee = target
 
+        callback_at = current.get("callback_at")
+        if payload.callback_at is not None:
+            if assignee and user["role"] not in LEAD_MANAGER_ROLES and assignee.lower() != me:
+                raise HTTPException(status_code=403, detail=f"Lead is assigned to @{assignee}")
+            raw = payload.callback_at.strip()
+            if raw:
+                try:
+                    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid callback time")
+                if parsed.tzinfo:
+                    parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                callback_at = parsed.isoformat(timespec="seconds")
+                status = "callback"
+                if not assignee and user["role"] == "handler":
+                    assignee = me
+            else:
+                callback_at = None
+        if status != "callback":
+            callback_at = None
+
         now = datetime.utcnow().isoformat()
         conn.execute(
-            "INSERT INTO lead_work(lead_key, assignee, work_status, updated_at, updated_by) VALUES(%s,%s,%s,%s,%s) "
+            "INSERT INTO lead_work(lead_key, assignee, work_status, updated_at, updated_by, callback_at) VALUES(%s,%s,%s,%s,%s,%s) "
             "ON CONFLICT(lead_key) DO UPDATE SET assignee=excluded.assignee, work_status=excluded.work_status, "
-            "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-            (lead_key, assignee, status, now, me),
+            "updated_at=excluded.updated_at, updated_by=excluded.updated_by, callback_at=excluded.callback_at",
+            (lead_key, assignee, status, now, me, callback_at),
         )
         conn.commit()
-        return {"status": "ok", "lead_key": lead_key, "assignee": assignee, "work_status": status}
+        if assignee and assignee.lower() != me and (current.get("assignee") or "").lower() != assignee.lower():
+            lead = next((x for x in build_leads(conn, {"role": "admin", "username": "system"}) if x["lead_key"] == lead_key), None)
+            notify_user(conn, assignee, f"📌 @{me} передал тебе лид: {lead_label(lead or {'lead_key': lead_key})}\nОткрой мини-апп → «Мой день».")
+        return {"status": "ok", "lead_key": lead_key, "assignee": assignee, "work_status": status, "callback_at": callback_at}
     finally:
         conn.close()
 
@@ -2481,6 +2701,73 @@ def add_lead_note(lead_key: str, payload: LeadNote, x_telegram_username: str = D
         return note
     finally:
         conn.close()
+
+
+@app.get("/api/v1/report/handlers")
+def handlers_report(days: int = 7, x_telegram_username: str = Depends(current_username)):
+    """Head view: lead -> REG -> FTD funnel per handler for leads that came in during the period."""
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Report access required")
+        leads = build_leads(conn, user)
+        team = [r["username"] for r in conn.execute(
+            "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+    finally:
+        conn.close()
+    now = datetime.utcnow()
+    cutoff = (now - timedelta(days=days)).isoformat() if days and days > 0 else ""
+    stale_before = (now - timedelta(hours=48)).isoformat()
+    now_iso = now.isoformat()
+
+    def blank(name):
+        return {"handler": name, "leads": 0, "reg": 0, "ftd": 0, "deposits": 0.0,
+                "in_work": 0, "callbacks_overdue": 0, "stale": 0, "lost": 0}
+
+    rows = {name: blank(name) for name in team}
+    for x in leads:
+        if cutoff and (x["first_seen_at"] or x["last_activity"] or "") < cutoff:
+            continue
+        name = (x["assignee"] or "").lower() or None
+        r = rows.setdefault(name, blank(name))
+        accs = x.get("matched_accounts") or []
+        rank = STAGE_ORDER.get(x["stage"], 0)
+        has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
+        is_reg = rank >= STAGE_ORDER["REG"] or bool(accs)
+        is_ftd = rank >= STAGE_ORDER["FTD"] or has_dep
+        r["leads"] += 1
+        r["reg"] += int(is_reg)
+        r["ftd"] += int(is_ftd)
+        dep = sum(float(a.get("deposits") or 0) for a in accs)
+        r["deposits"] += dep or float(x.get("ftd_amount") or 0)
+        if x["work_status"] == "lost":
+            r["lost"] += 1
+        elif not is_ftd and x["work_status"] != "won":
+            r["in_work"] += 1
+            if x["work_status"] == "callback" and x.get("callback_at") and x["callback_at"] < now_iso:
+                r["callbacks_overdue"] += 1
+            if (x["last_activity"] or "") < stale_before:
+                r["stale"] += 1
+
+    out = []
+    for r in rows.values():
+        r["deposits"] = round(r["deposits"], 2)
+        r["lead_to_reg"] = round(r["reg"] / r["leads"] * 100, 1) if r["leads"] else 0
+        r["reg_to_ftd"] = round(r["ftd"] / r["reg"] * 100, 1) if r["reg"] else 0
+        r["lead_to_ftd"] = round(r["ftd"] / r["leads"] * 100, 1) if r["leads"] else 0
+        out.append(r)
+    handlers = sorted([r for r in out if r["handler"]], key=lambda r: (-r["ftd"], -r["reg"], r["handler"]))
+    unassigned = next((r for r in out if not r["handler"]), blank(None))
+    total = blank("total")
+    for r in out:
+        for k in ("leads", "reg", "ftd", "deposits", "in_work", "callbacks_overdue", "stale", "lost"):
+            total[k] += r[k]
+    total["deposits"] = round(total["deposits"], 2)
+    total["lead_to_reg"] = round(total["reg"] / total["leads"] * 100, 1) if total["leads"] else 0
+    total["reg_to_ftd"] = round(total["ftd"] / total["reg"] * 100, 1) if total["reg"] else 0
+    total["lead_to_ftd"] = round(total["ftd"] / total["leads"] * 100, 1) if total["leads"] else 0
+    return {"days": days, "handlers": handlers, "unassigned": unassigned, "total": total}
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
