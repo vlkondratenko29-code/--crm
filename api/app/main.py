@@ -240,6 +240,28 @@ def init_db():
             FROM fxpro_accounts WHERE TRUE
             ON CONFLICT(broker, account_id) DO NOTHING
         """)
+        # Simple key/value settings editable from the Mini App (e.g. Chatterfy postback URL).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        # Broker events (REG/FTD) already pushed to Chatterfy, so each is sent once.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chatterfy_pushes (
+                lead_key TEXT NOT NULL,
+                event TEXT NOT NULL,
+                click_id TEXT,
+                amount DOUBLE PRECISION,
+                status TEXT,
+                response TEXT,
+                sent_at TEXT,
+                PRIMARY KEY (lead_key, event)
+            )
+        """)
         for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -841,8 +863,10 @@ async def import_broker_report(broker: str = Form(...), files: list[UploadFile] 
     finally:
         conn.close()
     found = set().union(*[set(m["columns"]) for m in mappings]) if mappings else set()
+    chatterfy_push = push_after_import()
     return {
         "status": "ok",
+        "chatterfy_push": chatterfy_push,
         "broker": broker,
         "files": len(files),
         "accounts": len(total),
@@ -1032,7 +1056,10 @@ async def import_fxpro_report(files: list[UploadFile] = File(...), x_telegram_us
             )
         """).fetchone()
         email_linked_clients = int(linked_row["c"] or 0)
-        return {"status":"ok","broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"accounts_with_email":imported_accounts_with_email,"rows":imported_clients + imported_accounts,"chatterfy_synced":0,"email_linked_clients":email_linked_clients,"file_types":file_types}
+        conn.close()
+        conn = None
+        chatterfy_push = push_after_import()
+        return {"status":"ok","chatterfy_push":chatterfy_push,"broker":"FxPro","files":files_ok,"client_rows":imported_clients,"account_rows":imported_accounts,"accounts_with_email":imported_accounts_with_email,"rows":imported_clients + imported_accounts,"chatterfy_synced":0,"email_linked_clients":email_linked_clients,"file_types":file_types}
     except Exception as exc:
         if conn is not None:
             try:
@@ -2214,6 +2241,169 @@ def reconciliation(broker: str = "", x_telegram_username: str = Depends(current_
     result["broker"] = broker
     result["last_import"] = {r["broker"]: r["at"] for r in last_import}
     return result
+
+
+# ---------------------------------------------------------------------------
+# Broker report -> Chatterfy. FxPro has no postbacks, so after a report upload
+# the CRM finds leads that registered / deposited at the broker and sends the
+# event to Chatterfy's Tracker "Custom Postback" (matched there by clickid).
+# ---------------------------------------------------------------------------
+
+CHATTERFY_POSTBACK_KEY = "chatterfy_postback_url"
+CHATTERFY_PUSH_LIMIT = 200
+
+
+def get_setting(conn, key, default=""):
+    row = conn.execute("SELECT value FROM app_settings WHERE key=%s", (key,)).fetchone()
+    return (row["value"] if row and row["value"] is not None else default)
+
+
+def set_setting(conn, key, value, username):
+    conn.execute(
+        "INSERT INTO app_settings(key, value, updated_at, updated_by) VALUES(%s,%s,%s,%s) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (key, value, datetime.utcnow().isoformat(), username),
+    )
+
+
+def _postback_base(url):
+    """Drop query params whose value is a template ({...}); we fill them ourselves."""
+    import urllib.parse
+    parts = urllib.parse.urlsplit(url.strip())
+    kept = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if "{" not in v and "}" not in v]
+    return parts, kept
+
+
+def chatterfy_push_candidates(conn):
+    """(lead, event, accounts) pairs the broker report proves but Chatterfy does not know yet."""
+    leads = build_leads(conn, {"role": "admin", "username": "system"})
+    done = {(r["lead_key"], r["event"]) for r in conn.execute(
+        "SELECT lead_key, event FROM chatterfy_pushes WHERE status='sent'").fetchall()}
+    out = []
+    for x in leads:
+        accs = x.get("matched_accounts") or []
+        if not accs:
+            continue
+        events = ["REG"]
+        if any(broker_lib.account_has_deposit(a) for a in accs):
+            events.append("FTD")
+        for ev in events:
+            if STAGE_ORDER.get(x["stage"], 0) >= STAGE_ORDER[ev]:
+                continue  # Chatterfy already has this stage
+            if (x["lead_key"], ev) in done:
+                continue
+            out.append((x, ev, accs))
+    return out
+
+
+def _deposit_amount(accs):
+    amounts = [float(a.get("ftd_amount") or 0) for a in accs if a.get("ftd_amount")]
+    if amounts:
+        return round(max(amounts), 2)
+    total = sum(float(a.get("deposits") or 0) for a in accs)
+    return round(total, 2) if total > 0 else None
+
+
+def run_chatterfy_push(conn, dry_run=False):
+    import urllib.parse
+    import urllib.request
+    url = get_setting(conn, CHATTERFY_POSTBACK_KEY)
+    candidates = chatterfy_push_candidates(conn)
+    stats = {"configured": bool(url), "candidates": len(candidates), "sent": 0, "failed": 0,
+             "no_click_id": 0, "dry_run": dry_run, "examples": []}
+    if not url:
+        return stats
+    parts, kept = _postback_base(url)
+    for lead, ev, accs in candidates[:CHATTERFY_PUSH_LIMIT]:
+        click_id = (lead.get("click_id") or "").strip()
+        if not click_id:
+            stats["no_click_id"] += 1
+            continue
+        amount = _deposit_amount(accs) if ev == "FTD" else None
+        reg_dates = [a.get("registration_date") for a in accs if a.get("registration_date")]
+        params = kept + [
+            ("clickid", click_id),
+            ("tracker.event", "registration" if ev == "REG" else "sale"),
+            ("tracker.tid", f"{lead['lead_key']}:{ev}"),
+            ("fields.broker_event", ev),
+            ("fields.broker_id", str(accs[0].get("account_id") or "")),
+            ("fields.datereg", (min(reg_dates) if reg_dates else "")[:10]),
+        ]
+        if amount is not None:
+            params += [("tracker.cost", str(amount)), ("tracker.currency", "USD"), ("fields.deposit_amount", str(amount))]
+        full = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(params), ""))
+        if len(stats["examples"]) < 3:
+            stats["examples"].append({"lead": lead.get("name") or lead.get("email") or lead["lead_key"], "event": ev, "amount": amount})
+        if dry_run:
+            continue
+        status, response = "sent", ""
+        try:
+            with urllib.request.urlopen(full, timeout=10) as r:
+                response = f"HTTP {r.status}"
+        except Exception as exc:  # keep going: one bad call must not stop the rest
+            status, response = "failed", f"{type(exc).__name__}: {exc}"[:300]
+        stats["sent" if status == "sent" else "failed"] += 1
+        conn.execute(
+            "INSERT INTO chatterfy_pushes(lead_key, event, click_id, amount, status, response, sent_at) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(lead_key, event) DO UPDATE SET status=excluded.status, response=excluded.response, sent_at=excluded.sent_at, amount=excluded.amount",
+            (lead["lead_key"], ev, click_id, amount, status, response, datetime.utcnow().isoformat()),
+        )
+    if not dry_run:
+        conn.commit()
+    return stats
+
+
+def push_after_import():
+    """Called after a broker report upload; never fails the upload itself."""
+    try:
+        conn = db()
+        try:
+            return run_chatterfy_push(conn)
+        finally:
+            conn.close()
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"[:300]}
+
+
+class ChatterfyPostbackSetting(BaseModel):
+    url: str = ""
+
+
+@app.get("/api/v1/settings/chatterfy-postback")
+def read_chatterfy_postback(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        url = get_setting(conn, CHATTERFY_POSTBACK_KEY)
+        last = conn.execute("SELECT status, COUNT(*) AS c FROM chatterfy_pushes GROUP BY status").fetchall()
+        return {"url": url, "pushes": {r["status"]: int(r["c"]) for r in last}}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/settings/chatterfy-postback")
+def save_chatterfy_postback(payload: ChatterfyPostbackSetting, x_telegram_username: str = Depends(current_username)):
+    url = (payload.url or "").strip()
+    if url and not url.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с https://")
+    conn = db()
+    try:
+        username = require_admin(x_telegram_username, conn)
+        set_setting(conn, CHATTERFY_POSTBACK_KEY, url, username)
+        conn.commit()
+        return {"status": "ok", "url": url}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/chatterfy/push")
+def push_to_chatterfy(dry_run: bool = False, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        return run_chatterfy_push(conn, dry_run=dry_run)
+    finally:
+        conn.close()
 
 
 class LeadWorkUpdate(BaseModel):
