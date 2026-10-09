@@ -328,3 +328,19 @@ nav button{padding:9px 2px;font-size:11px;white-space:nowrap;overflow:hidden;tex
 .recon-upload .upload-btn{margin-top:0;white-space:nowrap;justify-content:center;min-width:120px}
 .recon-upload .upload-btn.busy{opacity:.6}
 .col-map{margin-top:6px;color:#7f8b9e;font-size:10px;word-break:break-word}
+
+/* Bottom bar: 3–5 main tabs + «Ещё» sheet */
+nav{display:grid;gap:4px;z-index:50}
+nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding:7px 2px 9px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.nav-icon{font-size:15px;line-height:1;opacity:.85}
+.app{padding-bottom:110px}
+.more-backdrop{position:fixed;inset:0;z-index:49;background:rgba(3,6,10,.55);backdrop-filter:blur(2px)}
+.more-sheet{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);width:min(728px,calc(100% - 24px));padding:14px;background:#121822;border:1px solid #293545;border-radius:16px;box-shadow:0 16px 40px rgba(0,0,0,.5)}
+.more-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
+.more-grid button{display:flex;flex-direction:column;align-items:center;gap:6px;padding:14px 6px;border-radius:12px;background:#0d131b;border:1px solid #222d3b;color:#c6d2e2;font-size:12px;font-weight:650}
+.more-grid button span{font-size:18px}
+.more-grid button.active{border-color:#536a88;background:#1c2532;color:#fff}
+.search-hint{margin:10px 0 0}
+.open-lead{width:100%;margin:0 0 12px;padding:11px;border-radius:11px}
+.client-grid a,.lead-card .client-grid a{color:#8ec5ff}
+.handler-dashboard .mini-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
