@@ -686,6 +686,11 @@ def clean_attribution_value(value):
         return None
     return value
 
+# Ad campaign name: Facebook campaign from the lead params first, then the tracker's names.
+CAMPAIGN_KEYS = ("campaign_name", "tracker_campaign_name", "tracker_campaign", "utm_campaign")
+SOURCE_KEYS = ("tracker_source_name", "site_source_name", "utm_source", "tracker_source")
+
+
 def attribution_text(attr, *keys):
     for key in keys:
         value = clean_attribution_value(attr.get(key))
@@ -713,8 +718,8 @@ def notify_event(event_type: str, email: str | None, amount: float | None, attr:
     lines = [f"{icon} New {event_type}" + (f" · ${amount:,.2f}" if amount else "")]
     if email:
         lines.append(email)
-    campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign", "campaign_name", "utm_campaign")
-    source = attribution_text(attr, "tracker_source_name", "tracker_source", "utm_source")
+    campaign = attribution_text(attr, *CAMPAIGN_KEYS)
+    source = attribution_text(attr, *SOURCE_KEYS)
     if campaign or source:
         lines.append(" · ".join(x for x in (campaign, source) if x))
     threading.Thread(target=send_telegram_message, args=(TELEGRAM_NOTIFY_CHAT_ID, "\n".join(lines)), daemon=True).start()
@@ -1482,8 +1487,8 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
         item["attribution"] = attr
         if chatterfy_click_id and not item.get("click_id"):
             item["click_id"] = chatterfy_click_id
-        item["campaign"] = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
-        item["source"] = attribution_text(attr, "tracker_source_name", "tracker_source")
+        item["campaign"] = attribution_text(attr, *CAMPAIGN_KEYS)
+        item["source"] = attribution_text(attr, *SOURCE_KEYS)
         item["adset"] = attribution_text(attr, "adset_name", "adset_id")
         item["ad"] = attribution_text(attr, "ad_id")
         item["placement"] = attribution_text(attr, "placement")
@@ -1597,8 +1602,8 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
             "fxpro_accounts": [],
             "fxpro_account_count": 0,
             "attribution": attr,
-            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
-            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+            "campaign": attribution_text(attr, *CAMPAIGN_KEYS),
+            "source": attribution_text(attr, *SOURCE_KEYS),
             "adset": attribution_text(attr, "adset_name", "adset_id"),
             "ad": attribution_text(attr, "ad_id"),
             "placement": attribution_text(attr, "placement"),
@@ -1657,8 +1662,8 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
             "fxpro_accounts": accounts,
             "fxpro_account_count": len(accounts),
             "attribution": attr,
-            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
-            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+            "campaign": attribution_text(attr, *CAMPAIGN_KEYS),
+            "source": attribution_text(attr, *SOURCE_KEYS),
             "adset": attribution_text(attr, "adset_name", "adset_id"),
             "ad": attribution_text(attr, "ad_id"),
             "placement": attribution_text(attr, "placement"),
@@ -1755,8 +1760,8 @@ def traffic(x_telegram_username: str = Depends(current_username)):
             attr = {}
         attr = {k: clean_attribution_value(v) for k, v in attr.items()}
         attr = {k: v for k, v in attr.items() if v is not None}
-        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign") or "Unknown campaign"
-        source = attribution_text(attr, "tracker_source_name", "tracker_source") or "Unknown source"
+        campaign = attribution_text(attr, *CAMPAIGN_KEYS) or "Unknown campaign"
+        source = attribution_text(attr, *SOURCE_KEYS) or "Unknown source"
         adset = attribution_text(attr, "adset_name", "adset_id") or "Unknown adset"
         ad = attribution_text(attr, "ad_id") or "Unknown ad"
         placement = attribution_text(attr, "placement") or "Unknown placement"
@@ -1891,8 +1896,8 @@ def operations(x_telegram_username: str = Depends(current_username)):
             "email": r["email"] or f"Telegram {r['chat_id']}",
             "chat_id": r["chat_id"],
             "click_id": r["click_id"],
-            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign"),
-            "source": attribution_text(attr, "tracker_source_name", "tracker_source"),
+            "campaign": attribution_text(attr, *CAMPAIGN_KEYS),
+            "source": attribution_text(attr, *SOURCE_KEYS),
         })
     c = dict(counts)
     return {
@@ -1932,8 +1937,8 @@ def alerts(x_telegram_username: str = Depends(current_username)):
         except Exception:
             attr = {}
         attr = {k: clean_attribution_value(v) for k, v in attr.items()}
-        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign")
-        source = attribution_text(attr, "tracker_source_name", "tracker_source")
+        campaign = attribution_text(attr, *CAMPAIGN_KEYS)
+        source = attribution_text(attr, *SOURCE_KEYS)
         click = attribution_text(attr, "clickid") or row["click_id"]
         item = {"email": row["email"] or f"Telegram {row['chat_id']}", "chat_id": row["chat_id"], "click_id": click, "campaign": campaign, "source": source}
         if not row["email"] or row["email"].strip().lower() not in account_emails:
@@ -2068,8 +2073,8 @@ def dashboard(days: int = 0, x_telegram_username: str = Depends(current_username
             attr = {}
         attr = {k: clean_attribution_value(v) for k, v in attr.items()}
         attr = {k: v for k, v in attr.items() if v is not None}
-        campaign = attribution_text(attr, "tracker_campaign_name", "tracker_campaign") or "Unknown campaign"
-        source = attribution_text(attr, "tracker_source_name", "tracker_source") or "Unknown source"
+        campaign = attribution_text(attr, *CAMPAIGN_KEYS) or "Unknown campaign"
+        source = attribution_text(attr, *SOURCE_KEYS) or "Unknown source"
         adset = attribution_text(attr, "adset_name", "adset_id") or "Unknown adset"
         ad = attribution_text(attr, "ad_id") or "Unknown ad"
         placement = attribution_text(attr, "placement") or "Unknown placement"
@@ -2285,8 +2290,8 @@ def build_leads(conn, viewer, accounts=None):
             "name": attr.get("name"),
             "tg_username": attr.get("username"),
             "tags": attr.get("tags"),
-            "campaign": attribution_text(attr, "tracker_campaign_name", "tracker_campaign", "campaign_name", "utm_campaign"),
-            "source": attribution_text(attr, "tracker_source_name", "tracker_source", "utm_source"),
+            "campaign": attribution_text(attr, *CAMPAIGN_KEYS),
+            "source": attribution_text(attr, *SOURCE_KEYS),
             "chat_link": attr.get("chatlink"),
             "stage": stage,
             "ftd_amount": None if hide_money else ftd_amount,
