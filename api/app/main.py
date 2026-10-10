@@ -786,7 +786,7 @@ def lead_label(lead):
 
 
 HANDLER_NOTICES_SEEDED = "handler_notices_seeded"
-AUTO_ASSIGN_KEY = "auto_assign_on_reg"  # "1" (default) = give every new registration to a handler
+AUTO_ASSIGN_KEY = "auto_assign_on_reg"  # "1" = CRM gives new registrations to handlers (off by default: Chatterfy assigns operators)
 
 
 def pick_handler(conn):
@@ -809,7 +809,7 @@ def pick_handler(conn):
 
 def auto_assign(conn, lead, reason):
     """Give an unassigned lead to a handler and tell them. Returns the handler or None."""
-    if get_setting(conn, AUTO_ASSIGN_KEY, "1") != "1":
+    if get_setting(conn, AUTO_ASSIGN_KEY, "0") != "1":
         return None
     handler = pick_handler(conn)
     if not handler:
@@ -941,7 +941,7 @@ def get_auto_assign(x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
-        return {"enabled": get_setting(conn, AUTO_ASSIGN_KEY, "1") == "1"}
+        return {"enabled": get_setting(conn, AUTO_ASSIGN_KEY, "0") == "1"}
     finally:
         conn.close()
 
