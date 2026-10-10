@@ -4,6 +4,7 @@ import "./styles.css";
 import { authHeaders } from "./api.js";
 import Leads, { LeadCard } from "./Leads.jsx";
 import Stats from "./Stats.jsx";
+import Watch from "./Watch.jsx";
 import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
@@ -53,7 +54,7 @@ function App() {
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   // `main` tabs sit in the bottom bar; the rest open from «Ещё».
   const roleMeta = {
-    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["clients", "finance", "traffic", "operations", "alerts", "admin"] },
+    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
     head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "traffic"], more: ["clients", "reconcile", "finance"] },
     seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: [] },
     handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] },
@@ -345,6 +346,7 @@ function App() {
         <p className="recon-hint search-hint">Ищет по имени и @username из Telegram, UID у брокера, телефону, email, Click ID и логину FxPro.</p>
       </section>}
       {tab === "stats" && canSee("stats") && <Stats username={effectiveUser.username} />}
+      {tab === "watch" && canSee("watch") && <Watch username={effectiveUser.username} />}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">КОМАНДА</p>
         <h2>Доступ команды</h2>
@@ -490,11 +492,11 @@ function App() {
 }
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
-  finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда",
+  finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",
 };
 const TAB_ICONS = {
   dashboard: "◉", leads: "☷", reconcile: "⚖", clients: "⌕", stats: "◈",
-  finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥",
+  finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥", watch: "🛡",
 };
 const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", seo: "SEO", handler: "Обработчик" };
 const STATUS_LABELS = { "Chatterfy lead": "Лид Chatterfy", "FxPro account": "Счёт FxPro" };
