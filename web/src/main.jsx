@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { authHeaders } from "./api.js";
 import Leads, { LeadCard } from "./Leads.jsx";
-import MyDay from "./MyDay.jsx";
+import Stats from "./Stats.jsx";
 import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
@@ -39,7 +39,8 @@ function App() {
   const [alerts, setAlerts] = useState(null);
   const [trafficCampaign, setTrafficCampaign] = useState("all");
   const [trafficSource, setTrafficSource] = useState("all");
-  const [tab, setTab] = useState("dashboard");
+  const [tab, setTab] = useState("stats");
+  const [newEmail, setNewEmail] = useState("");
   const [team, setTeam] = useState([]);
   const [newUser, setNewUser] = useState("");
   const [newRole, setNewRole] = useState("handler");
@@ -52,18 +53,18 @@ function App() {
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   // `main` tabs sit in the bottom bar; the rest open from «Ещё».
   const roleMeta = {
-    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["dashboard", "leads", "clients", "reconcile"], more: ["stats", "finance", "traffic", "operations", "alerts", "admin"] },
-    head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["dashboard", "leads", "clients", "traffic"], more: ["reconcile", "stats", "finance"] },
-    seo: { label: "SEO", title: "Трафик и воронка", main: ["dashboard", "clients", "stats"], more: [] },
-    handler: { label: "ОБРАБОТЧИК", title: "Работа с клиентами", main: ["dashboard", "leads", "clients"], more: [] },
-  }[effectiveUser.role] || { label: "ОБРАБОТЧИК", title: "Работа с клиентами", main: ["dashboard", "leads", "clients"], more: [] };
+    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["clients", "finance", "traffic", "operations", "alerts", "admin"] },
+    head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "traffic"], more: ["clients", "reconcile", "finance"] },
+    seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: [] },
+    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] },
+  }[effectiveUser.role] || { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] };
   roleMeta.tabs = [...roleMeta.main, ...roleMeta.more];
   const canSee = (id) => roleMeta.tabs.includes(id);
   const leadRoles = ["admin", "head_buying", "handler"];
   const [moreOpen, setMoreOpen] = useState(false);
   const [openLead, setOpenLead] = useState(null);
   // If a role switch (preview) hides the current tab, fall back to the home screen.
-  React.useEffect(() => { if (!canSee(tab)) setTab("dashboard"); }, [effectiveUser.role]);
+  React.useEffect(() => { if (!canSee(tab)) setTab("stats"); }, [effectiveUser.role]);
   const buyingRows = useMemo(() => (stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)), [stats.chatterfy?.attribution, buyingCampaign, buyingSource]);
   const buyingTotals = useMemo(() => buyingRows.reduce((a, x) => ({ leads: a.leads + Number(x.leads || 0), reg: a.reg + Number(x.reg || 0), ftd: a.ftd + Number(x.ftd || 0), ft: a.ft + Number(x.ft || 0), deposits: a.deposits + Number(x.deposits || 0) }), { leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 }), [buyingRows]);
 
@@ -138,12 +139,13 @@ function App() {
         method: "POST",
         signal: controller.signal,
         headers: { "Content-Type": "application/json", ...authHeaders(effectiveUser.username) },
-        body: JSON.stringify({ username, role: newRole, active: true })
+        body: JSON.stringify({ username, role: newRole, active: true, ...(newEmail.trim() ? { chatterfy_email: newEmail.trim() } : {}) })
       });
       clearTimeout(timer);
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || ("Ошибка сервера: HTTP " + res.status));
       setNewUser("");
+      setNewEmail("");
       setTeamMessage("@" + username + " добавлен как " + (ROLE_LABELS[newRole] || newRole));
       await loadTeam();
     } catch (error) {
@@ -220,7 +222,7 @@ function App() {
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>{tab === "dashboard" && effectiveUser.role === "handler" ? "Мой день" : TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 09.10</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>{TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 10.10</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -229,7 +231,7 @@ function App() {
         <strong>{roleMeta.label}</strong>
       </section>
 
-      {((tab === "dashboard" && effectiveUser.role !== "handler") || tab === "stats") && <div className="period-switch">
+      {tab === "dashboard" && <div className="period-switch">
         {[["0", "За всё время"], ["1", "Сегодня"], ["7", "7 дней"], ["30", "30 дней"], ["90", "90 дней"]].map(([v, label]) => <button key={v} className={period === v ? "selected" : ""} onClick={() => setPeriod(v)}>{label}</button>)}
       </div>}
 
@@ -327,7 +329,6 @@ function App() {
         <div className="mini-metrics"><div><span>Лиды</span><b>{stats.leads}</b></div><div><span>REG → FTD</span><b>{stats.funnel?.reg_to_ftd ?? 0}%</b></div><div><span>REG → FT</span><b>{stats.funnel?.reg_to_ft ?? 0}%</b></div></div>
         <div className="section-title">Топ стран</div><div className="country-list">{(stats.top_countries || []).map(x => <div key={x.country}><span>{x.country}</span><b>{x.count}</b></div>)}</div>
       </section>}
-      {tab === "dashboard" && effectiveUser.role === "handler" && <MyDay username={effectiveUser.username} onOpenLeads={() => go("leads")} />}
 
       {tab === "leads" && canSee("leads") && <Leads username={effectiveUser.username} role={effectiveUser.role} />}
       {tab === "reconcile" && canSee("reconcile") && <Reconcile username={effectiveUser.username} isAdmin={actualUser.is_admin} />}
@@ -343,25 +344,13 @@ function App() {
         </div>
         <p className="recon-hint search-hint">Ищет по имени и @username из Telegram, UID у брокера, телефону, email, Click ID и логину FxPro.</p>
       </section>}
-      {tab === "stats" && canSee("stats") && <section className="role-dashboard analytics-dashboard">
-        <div className="role-hero"><div><p className="eyebrow">АНАЛИТИКА</p><h2>Результаты компании</h2><p>GEO, воронка и трафик на одном экране.</p></div><span>◈</span></div>
-        <div className="exec-kpis">
-          <div><span>ЛИДЫ</span><b>{stats.leads}</b></div><div><span>REG</span><b>{stats.reg}</b></div><div><span>FTD</span><b>{stats.ftd}</b></div><div><span>FT</span><b>{stats.ft}</b></div>
-          <div><span>ДЕПОЗИТЫ</span><b>{effectiveUser.role === "seo" ? "Скрыто" : "$" + Number(stats.deposits || 0).toFixed(2)}</b></div>
-          <div><span>СРЕДНИЙ FTD</span><b>{effectiveUser.role === "seo" ? "Скрыто" : "$" + (stats.ftd ? (Number(stats.deposits || 0)/stats.ftd).toFixed(2) : "0.00")}</b></div>
-        </div>
-        <div className="section-title">Результат по GEO</div>
-        <div className="geo-table">{(stats.geo || []).map(x => <div className="geo-row" key={x.country}><b>{x.country}</b><span>{x.leads} лид.</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><strong>{effectiveUser.role === "seo" ? "Скрыто" : "$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
-        <div className="section-title">Результат по трафику</div>
-        <div className="traffic-table">{(stats.chatterfy?.attribution || []).map((x,i) => <div className="traffic-row" key={x.click_id+i}><div><b>{x.campaign}</b><small>{x.source}</small></div><span>{x.leads} лид.</span><span>{x.reg} REG</span><span>{x.ftd} FTD</span><strong>{effectiveUser.role === "seo" ? "—" : "$" + Number(x.deposits || 0).toFixed(0)}</strong></div>)}</div>
-        <div className="section-title">FTD по дням (последние 14)</div>
-        <div className="daily-strip">{(stats.daily || []).slice(-14).map(x => <div key={x.date}><b>{x.ftd}</b><span>FTD</span><small>{x.date.slice(5)}</small></div>)}</div>
-      </section>}
+      {tab === "stats" && canSee("stats") && <Stats username={effectiveUser.username} />}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">КОМАНДА</p>
         <h2>Доступ команды</h2>
         <div className="team-form">
           <input value={newUser} onChange={e => setNewUser(e.target.value)} placeholder="@telegram_username" />
+          <input value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="email в Chatterfy (для обработчиков)" />
           <select value={newRole} onChange={e => setNewRole(e.target.value)}>
             <option value="handler">Обработчик</option>
             <option value="seo">SEO</option>
@@ -372,7 +361,7 @@ function App() {
         </div>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
         <div className="team-list">
-          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
+          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
         </div>
       </section>}
       {loading && tab === "clients" && !openLead && <section className="card"><p>Ищу…</p></section>}
@@ -493,7 +482,7 @@ function App() {
         </div>
       </div>}
       <nav style={{ gridTemplateColumns: `repeat(${roleMeta.main.length + (roleMeta.more.length ? 1 : 0)}, minmax(0, 1fr))` }}>
-        {roleMeta.main.map(id => <button key={id} className={tab === id ? "active" : ""} onClick={() => go(id)}><span className="nav-icon">{TAB_ICONS[id]}</span>{id === "dashboard" && effectiveUser.role === "handler" ? "Мой день" : TAB_LABELS[id]}</button>)}
+        {roleMeta.main.map(id => <button key={id} className={tab === id ? "active" : ""} onClick={() => go(id)}><span className="nav-icon">{TAB_ICONS[id]}</span>{TAB_LABELS[id]}</button>)}
         {roleMeta.more.length > 0 && <button className={roleMeta.more.includes(tab) || moreOpen ? "active" : ""} onClick={() => setMoreOpen(o => !o)}><span className="nav-icon">☰</span>{roleMeta.more.includes(tab) ? TAB_LABELS[tab] : "Ещё"}</button>}
       </nav>
     </main>
