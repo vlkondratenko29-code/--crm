@@ -249,6 +249,22 @@ def init_db():
                 updated_by TEXT
             )
         """)
+        # Facebook Ads Manager spend, one row per day + campaign + ad set + ad.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ad_spend (
+                day TEXT NOT NULL,
+                campaign TEXT NOT NULL,
+                adset TEXT NOT NULL DEFAULT '',
+                ad TEXT NOT NULL DEFAULT '',
+                spend DOUBLE PRECISION,
+                impressions DOUBLE PRECISION,
+                clicks DOUBLE PRECISION,
+                currency TEXT,
+                uploaded_at TEXT,
+                uploaded_by TEXT,
+                PRIMARY KEY (day, campaign, adset, ad)
+            )
+        """)
         # Broker events (REG/FTD) already pushed to Chatterfy, so each is sent once.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chatterfy_pushes (
@@ -2292,6 +2308,10 @@ def build_leads(conn, viewer, accounts=None):
             "tags": attr.get("tags"),
             "campaign": attribution_text(attr, *CAMPAIGN_KEYS),
             "source": attribution_text(attr, *SOURCE_KEYS),
+            "adset": attribution_text(attr, "adset_name", "adset_id"),
+            "ad": attribution_text(attr, "ad_name", "ad_id"),
+            "placement": attribution_text(attr, "placement"),
+            "dialog_at": event_at.get("DIALOG"),
             "chat_link": attr.get("chatlink"),
             "stage": stage,
             "ftd_amount": None if hide_money else ftd_amount,
@@ -3012,6 +3032,13 @@ def stats_overview(days: int = 7, x_telegram_username: str = Depends(current_use
     start = (today - timedelta(days=days - 1)).isoformat() if days and days > 0 else ""
     span = min(days, 31) if days and days > 0 else 14
     day_list = [(today - timedelta(days=i)).isoformat() for i in range(span - 1, -1, -1)]
+    conn = db()
+    try:
+        since_day = data_since(conn)
+    finally:
+        conn.close()
+    if since_day:
+        day_list = [d for d in day_list if d >= since_day] or day_list[-1:]
 
     def handler_name(x):
         a = (x.get("assignee") or "").lower()
@@ -3092,6 +3119,227 @@ def stats_overview(days: int = 7, x_telegram_username: str = Depends(current_use
         "by_handler": handlers,
         "by_campaign": campaigns[:40],
         "feed": feed[:60],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Buying: Ads Manager spend vs leads -> dialogs -> registrations -> deposits
+# ---------------------------------------------------------------------------
+
+def _num(value):
+    text = str(value or "").strip().replace(" ", "").replace(" ", "")
+    if not text or text in ("-", "—"):
+        return 0.0
+    if "," in text and "." in text:
+        text = text.replace(",", "") if text.rfind(".") > text.rfind(",") else text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", ".")
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _parse_day(value):
+    text = str(value or "").strip()[:10]
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y", "%Y.%m.%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def _pick(headers, *needles, exclude=()):
+    """First header whose normalised text contains every word of one of the needles."""
+    for needle in needles:
+        words = [broker_lib._norm_header(w) for w in needle.split("+")]
+        for h in headers:
+            n = broker_lib._norm_header(h)
+            if all(w in n for w in words) and not any(broker_lib._norm_header(x) in n for x in exclude):
+                return h
+    return None
+
+
+def parse_ads_manager(raw: bytes):
+    """Facebook Ads Manager export (EN / RU / TR) -> rows of day, campaign, adset, ad, spend, impressions, clicks."""
+    headers, rows = broker_lib.read_csv(raw)
+    if not headers:
+        raise HTTPException(status_code=400, detail="Пустой файл")
+    c_day = _pick(headers, "day", "день", "gün", "date+start", "reporting+starts", "дата+начала", "начало+отчет", "raporlama+başlangıcı")
+    c_end = _pick(headers, "reporting+ends", "дата+окончания", "окончание+отчет", "raporlama+bitişi")
+    c_campaign = _pick(headers, "campaign+name", "название+кампании", "кампания", "kampanya+adı", "kampanya")
+    c_adset = _pick(headers, "ad+set+name", "название+группы", "группа+объявлений", "reklam+seti+adı", "reklam+seti")
+    c_ad = _pick(headers, "ad+name", "название+объявления", "reklam+adı", exclude=("set", "групп", "seti"))
+    c_spend = _pick(headers, "amount+spent", "сумма+затрат", "потраченная+сумма", "затраты", "harcanan+tutar", "spend")
+    c_impr = _pick(headers, "impressions", "показы", "gösterim")
+    c_clicks = _pick(headers, "link+clicks", "клики+по+ссылке", "bağlantı+tıklamaları", "clicks", "клики")
+    if not c_campaign or not c_spend:
+        raise HTTPException(status_code=400, detail="Не нашёл колонки «Название кампании» и «Сумма затрат». Выгрузи отчёт из Ads Manager с разбивкой по дням.")
+    m = re.search(r"\(([A-Z]{3})\)", c_spend or "")
+    currency = m.group(1) if m else "USD"
+    out = []
+    for row in rows:
+        campaign = str(row.get(c_campaign) or "").strip()
+        if not campaign or campaign.lower() in ("all", "итого", "total", "toplam"):
+            continue
+        start = _parse_day(row.get(c_day)) if c_day else None
+        end = _parse_day(row.get(c_end)) if c_end else None
+        if not start:
+            continue
+        end = end if end and end >= start else start
+        n_days = (end - start).days + 1
+        spend, impr, clicks = _num(row.get(c_spend)), _num(row.get(c_impr)) if c_impr else 0.0, _num(row.get(c_clicks)) if c_clicks else 0.0
+        for i in range(n_days):  # a multi-day row is spread evenly so daily numbers still add up
+            out.append({"day": (start + timedelta(days=i)).isoformat(), "campaign": campaign,
+                        "adset": str(row.get(c_adset) or "").strip() if c_adset else "",
+                        "ad": str(row.get(c_ad) or "").strip() if c_ad else "",
+                        "spend": spend / n_days, "impressions": impr / n_days, "clicks": clicks / n_days, "currency": currency})
+    if not out:
+        raise HTTPException(status_code=400, detail="В файле нет строк с датой и кампанией")
+    return out
+
+
+@app.post("/api/v1/ads/spend/import")
+async def import_ad_spend(files: list[UploadFile] = File(...), x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Только админ и хэд баинга")
+        rows = []
+        for f in files:
+            rows += parse_ads_manager(await f.read())
+        merged = {}
+        for r in rows:  # several lines for the same key in one upload are summed
+            k = (r["day"], r["campaign"], r["adset"], r["ad"])
+            if k in merged:
+                for f in ("spend", "impressions", "clicks"):
+                    merged[k][f] += r[f]
+            else:
+                merged[k] = dict(r)
+        now = datetime.utcnow().isoformat()
+        for r in merged.values():
+            conn.execute(
+                "INSERT INTO ad_spend(day, campaign, adset, ad, spend, impressions, clicks, currency, uploaded_at, uploaded_by) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(day, campaign, adset, ad) DO UPDATE SET "
+                "spend=excluded.spend, impressions=excluded.impressions, clicks=excluded.clicks, currency=excluded.currency, "
+                "uploaded_at=excluded.uploaded_at, uploaded_by=excluded.uploaded_by",
+                (r["day"], r["campaign"], r["adset"], r["ad"], round(r["spend"], 4), r["impressions"], r["clicks"], r["currency"], now, user["username"]),
+            )
+        conn.commit()
+        days = sorted({r["day"] for r in merged.values()})
+        return {"rows": len(merged), "days": [days[0], days[-1]] if days else [],
+                "spend": round(sum(r["spend"] for r in merged.values()), 2),
+                "currency": sorted({r["currency"] for r in merged.values()})}
+    finally:
+        conn.close()
+
+
+MIN_LEADS_FOR_DECISION = 30
+
+
+def _key(text):
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+@app.get("/api/v1/stats/buying")
+def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: str = Depends(current_username)):
+    """Per campaign / ad set / ad: spend, leads, dialogs, REG, FTD, deposits and the cost of each step."""
+    if level not in ("campaign", "adset", "ad"):
+        level = "campaign"
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Только админ и хэд баинга")
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        since = data_since(conn)
+        spend_rows = [dict(r) for r in conn.execute("SELECT * FROM ad_spend").fetchall()]
+        last_upload = conn.execute("SELECT MAX(uploaded_at) AS at FROM ad_spend").fetchone()
+    finally:
+        conn.close()
+
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    start = (today - timedelta(days=days - 1)).isoformat() if days and days > 0 else ""
+    start = max(start, since or "")
+
+    def group_key(campaign, adset, ad):
+        parts = {"campaign": (campaign,), "adset": (campaign, adset), "ad": (campaign, adset, ad)}[level]
+        return tuple(_key(p) for p in parts), parts
+
+    groups = {}
+
+    def g(key, label):
+        return groups.setdefault(key, {"label": label, "spend": 0.0, "impressions": 0.0, "clicks": 0.0,
+                                       "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0})
+
+    currencies = set()
+    for r in spend_rows:
+        if r["day"] < start:
+            continue
+        key, label = group_key(r["campaign"], r["adset"], r["ad"])
+        b = g(key, label)
+        b["spend"] += float(r["spend"] or 0)
+        b["impressions"] += float(r["impressions"] or 0)
+        b["clicks"] += float(r["clicks"] or 0)
+        currencies.add(r["currency"] or "USD")
+
+    def in_period(day):
+        return bool(day) and day >= start
+
+    for x in leads:
+        accs = x.get("matched_accounts") or []
+        rank = STAGE_ORDER.get(x["stage"], 0)
+        has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
+        lead_day = _stat_day(x.get("first_seen_at"))
+        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or (lead_day if (rank >= 1 or accs) else None)
+        ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
+        dialog = bool(x.get("dialog_at")) or bool(reg_day) or bool(ftd_day)
+        key, label = group_key(x.get("campaign") or "Без кампании", x.get("adset") or "", x.get("ad") or "")
+        b = g(key, label)
+        if in_period(lead_day):
+            b["leads"] += 1
+            b["dialogs"] += int(dialog)
+        b["reg"] += int(in_period(reg_day))
+        if in_period(ftd_day):
+            b["ftd"] += 1
+            b["deposits"] += sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
+
+    def per(a, b):
+        return round(a / b, 2) if b else None
+
+    rows, total = [], {"spend": 0.0, "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0, "clicks": 0.0}
+    for b in groups.values():
+        if not (b["spend"] or b["leads"] or b["reg"] or b["ftd"]):
+            continue
+        for k in total:
+            total[k] += b[k]
+        rows.append({
+            "campaign": b["label"][0], "adset": b["label"][1] if len(b["label"]) > 1 else None,
+            "ad": b["label"][2] if len(b["label"]) > 2 else None,
+            "spend": round(b["spend"], 2), "clicks": int(b["clicks"]), "leads": b["leads"], "dialogs": b["dialogs"],
+            "reg": b["reg"], "ftd": b["ftd"], "deposits": round(b["deposits"], 2),
+            "cpl": per(b["spend"], b["leads"]), "cp_reg": per(b["spend"], b["reg"]), "cp_ftd": per(b["spend"], b["ftd"]),
+            "click_to_lead": round(b["leads"] / b["clicks"] * 100, 1) if b["clicks"] else None,
+            "dialog_rate": round(b["dialogs"] / b["leads"] * 100, 1) if b["leads"] else None,
+            "reg_rate": round(b["reg"] / b["leads"] * 100, 1) if b["leads"] else None,
+            "roi": round((b["deposits"] - b["spend"]) / b["spend"] * 100, 1) if b["spend"] else None,
+            "low_data": b["leads"] < MIN_LEADS_FOR_DECISION,
+        })
+    rows.sort(key=lambda r: (-r["spend"], -r["leads"]))
+    t = total
+    return {
+        "days": days, "level": level, "since": start,
+        "currency": ", ".join(sorted(currencies)) or "USD",
+        "last_upload": last_upload["at"] if last_upload else None,
+        "min_leads": MIN_LEADS_FOR_DECISION,
+        "total": {**{k: (round(v, 2) if isinstance(v, float) else v) for k, v in t.items()},
+                  "cpl": per(t["spend"], t["leads"]), "cp_reg": per(t["spend"], t["reg"]), "cp_ftd": per(t["spend"], t["ftd"]),
+                  "dialog_rate": round(t["dialogs"] / t["leads"] * 100, 1) if t["leads"] else None,
+                  "roi": round((t["deposits"] - t["spend"]) / t["spend"] * 100, 1) if t["spend"] else None},
+        "rows": rows[:100],
     }
 
 
