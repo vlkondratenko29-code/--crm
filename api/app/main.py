@@ -938,6 +938,25 @@ if TELEGRAM_BOT_TOKEN and os.getenv("DISABLE_NOTIFY_LOOP", "0") != "1":
     threading.Thread(target=_notify_loop, daemon=True).start()
 
 
+class DataSinceSetting(BaseModel):
+    since: str = ""  # YYYY-MM-DD, "" = all history
+
+
+@app.post("/api/v1/settings/data-since")
+def set_data_since(payload: DataSinceSetting, x_telegram_username: str = Depends(current_username)):
+    value = payload.since.strip()
+    if value and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise HTTPException(status_code=400, detail="Date must be YYYY-MM-DD")
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        set_setting(conn, DATA_SINCE_KEY, value, admin)
+        conn.commit()
+        return {"since": value}
+    finally:
+        conn.close()
+
+
 class AutoAssignSetting(BaseModel):
     enabled: bool
 
@@ -1959,8 +1978,15 @@ def dashboard(days: int = 0, x_telegram_username: str = Depends(current_username
         conn.close()
 
     cutoff = (datetime.utcnow() - timedelta(days=days)) if days and days > 0 else None
+    conn = db()
+    try:
+        since = data_since(conn)
+    finally:
+        conn.close()
     leads = []
     for row in lead_rows:
+        if since and not after_since(row["first_seen_at"], since):
+            continue
         if cutoff and row["first_seen_at"]:
             try:
                 if datetime.fromisoformat(str(row["first_seen_at"]).replace("Z", "+00:00")).replace(tzinfo=None) < cutoff:
@@ -2157,6 +2183,25 @@ def load_broker_accounts(conn, broker=None):
     return accounts
 
 
+DATA_SINCE_KEY = "data_since"
+DATA_SINCE_DEFAULT = os.getenv("DATA_SINCE", "2026-10-09")  # team decided to count only from this day (Turkey time)
+
+
+def data_since(conn):
+    """First calendar day (YYYY-MM-DD, Turkey time) the CRM counts; older leads and broker clients are ignored."""
+    try:
+        return get_setting(conn, DATA_SINCE_KEY, DATA_SINCE_DEFAULT) or ""
+    except Exception:
+        return DATA_SINCE_DEFAULT
+
+
+def after_since(value, since):
+    if not since:
+        return True
+    day = _stat_day(value)
+    return bool(day) and day >= since
+
+
 def build_leads(conn, viewer, accounts=None):
     """Return every lead as a dict. Small enough to filter in Python."""
     lead_rows = conn.execute(
@@ -2257,6 +2302,9 @@ def build_leads(conn, viewer, accounts=None):
             "notes": note_counts.get(key, 0),
             "last_activity": activity or None,
         })
+    since = data_since(conn)
+    if since:
+        result = [x for x in result if after_since(x["first_seen_at"], since)]
     result.sort(key=lambda x: x["last_activity"] or "", reverse=True)
     return result
 
@@ -2554,15 +2602,18 @@ def reconciliation(broker: str = "", x_telegram_username: str = Depends(current_
         if user["role"] not in LEAD_MANAGER_ROLES:
             raise HTTPException(status_code=403, detail="Reconciliation access required")
         all_accounts = load_broker_accounts(conn)
+        since = data_since(conn)
         brokers = sorted({a["broker"] for a in all_accounts} | {"FxPro"})
         accounts = [a for a in all_accounts if a["broker"] == broker] if broker else all_accounts
         leads = build_leads(conn, user, accounts=accounts)
+        recent = [a for a in accounts if after_since(a.get("registration_date") or a.get("ftd_date"), since)]
         last_import = conn.execute(
             "SELECT broker, MAX(imported_at) AS at FROM broker_accounts GROUP BY broker"
         ).fetchall()
     finally:
         conn.close()
-    result = reconcile(leads, accounts)
+    result = reconcile(leads, recent)
+    result["data_since"] = since
     result["brokers"] = brokers
     result["broker"] = broker
     result["last_import"] = {r["broker"]: r["at"] for r in last_import}
