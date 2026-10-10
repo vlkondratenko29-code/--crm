@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from .auth import validate_init_data
 from . import brokers as broker_lib
+from . import watch as watch_lib
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
@@ -291,6 +292,23 @@ def init_db():
                 assignee TEXT,
                 sent_at TEXT,
                 PRIMARY KEY (lead_key, event)
+            )
+        """)
+        # Operator watch: suspicious outgoing messages found in Chatterfy chats.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watch_alerts (
+                message_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                found TEXT,
+                chat_id TEXT,
+                chat_name TEXT,
+                sender_id TEXT,
+                sender_name TEXT,
+                text TEXT,
+                message_at TEXT,
+                found_at TEXT,
+                notified INTEGER DEFAULT 0,
+                PRIMARY KEY (message_id, kind)
             )
         """)
         for admin_username in PRIMARY_ADMINS:
@@ -3341,6 +3359,264 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
                   "roi": round((t["deposits"] - t["spend"]) / t["spend"] * 100, 1) if t["spend"] else None},
         "rows": rows[:100],
     }
+
+
+# ---------------------------------------------------------------------------
+# Operator watch + channel source (reads Chatterfy with a service-account key)
+# ---------------------------------------------------------------------------
+
+WATCH_KEY_SETTING = "chatterfy_api_key"
+WATCH_CURSOR = "watch_cursor"
+WATCH_STATUS = "watch_status"
+WATCH_ALLOWED = "watch_allowed"
+WATCH_CODES = "channel_code_words"
+CHATTERFY_BOT_ID = os.getenv("CHATTERFY_BOT_ID", "019ff5ed-945e-724e-9d11-f21afb5852b9")
+CHATTERFY_SPACE_ID = os.getenv("CHATTERFY_SPACE_ID", "019feada-c6d0-74f5-a35a-af0b1e5d81dd")
+WATCH_LOOP_SECONDS = int(os.getenv("WATCH_LOOP_SECONDS", "180"))
+WATCH_FIRST_LOOKBACK_HOURS = 24
+_watch_lock = threading.Lock()
+_space_users = {"at": None, "map": {}}
+
+
+def watch_key(conn):
+    return (os.getenv("CHATTERFY_API_KEY") or get_setting(conn, WATCH_KEY_SETTING, "") or "").strip()
+
+
+def _list_setting(conn, key, default):
+    raw = get_setting(conn, key, "")
+    items = [x.strip() for x in re.split(r"[\n,]", raw) if x.strip()] if raw else []
+    return tuple(items) or tuple(default)
+
+
+def _chat_link(chat_id):
+    return f"https://app.chatterfy.ai/bots/{CHATTERFY_BOT_ID}/chats?chat={chat_id}"
+
+
+def _sender_names(conn, client):
+    """Chatterfy user id -> readable name (CRM @username when the email is linked in «Команда»)."""
+    now = datetime.utcnow()
+    if _space_users["at"] and (now - _space_users["at"]).total_seconds() < 3600:
+        return _space_users["map"]
+    names = {}
+    try:
+        users = client.space_users(CHATTERFY_SPACE_ID)
+    except Exception as exc:
+        print(f"watch: space users failed: {exc}")
+        users = []
+    crm = {(r["chatterfy_email"] or "").lower(): r["username"] for r in conn.execute(
+        "SELECT username, chatterfy_email FROM crm_users WHERE chatterfy_email IS NOT NULL").fetchall()}
+    for u in users:
+        email = (u.get("email") or "").lower()
+        full = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x).strip()
+        if email in crm:
+            names[u.get("id")] = "@" + crm[email]
+        else:
+            names[u.get("id")] = f"{full} ({email})" if full and email else (full or email or u.get("id"))
+    _space_users.update(at=now, map=names)
+    return names
+
+
+def _alert_recipients(conn):
+    if TELEGRAM_NOTIFY_CHAT_ID:
+        return [TELEGRAM_NOTIFY_CHAT_ID]
+    rows = conn.execute("SELECT tg_id FROM crm_users WHERE role='admin' AND active=TRUE AND tg_id IS NOT NULL").fetchall()
+    return [r["tg_id"] for r in rows if r["tg_id"]]
+
+
+def _tag_channel_source(conn, chat, items, codes):
+    """Chats that did not come from an ad get a campaign «Канал · <code word>» so stats show the rubric."""
+    params = ((chat.get("lead") or {}).get("params") or {})
+    if params.get("campaign_name") or params.get("utm_campaign"):
+        return False
+    ids = [x for x in (str(chat.get("id") or ""), str(chat.get("external_id") or "")) if x]
+    if not ids:
+        return False
+    row = conn.execute(
+        "SELECT chat_id, attribution_json FROM chatterfy_leads WHERE chat_id IN (%s)" % ",".join(["%s"] * len(ids)),
+        tuple(ids)).fetchone()
+    if not row:
+        return False
+    attr = _load_attr(row["attribution_json"])
+    if attribution_text(attr, *CAMPAIGN_KEYS):
+        return False
+    incoming = sorted((m for m in items if m.get("sender_type") == "incoming" and m.get("content")),
+                      key=lambda m: m.get("created_at") or "")
+    word = None
+    for m in incoming[:3]:
+        word = watch_lib.code_word(m.get("content"), codes)
+        if word:
+            break
+    attr.update({"campaign_name": f"Канал · {word}" if word else "Канал · без кода", "site_source_name": "channel"})
+    conn.execute("UPDATE chatterfy_leads SET attribution_json=%s WHERE chat_id=%s",
+                 (json.dumps(attr, ensure_ascii=False), row["chat_id"]))
+    return True
+
+
+def run_watch(conn, max_chats=300):
+    key = watch_key(conn)
+    if not key:
+        return {"status": "no_key"}
+    client = watch_lib.Chatterfy(key)
+    now = datetime.utcnow()
+    cursor = get_setting(conn, WATCH_CURSOR, "") or (now - timedelta(hours=WATCH_FIRST_LOOKBACK_HOURS)).isoformat() + "Z"
+    allowed = _list_setting(conn, WATCH_ALLOWED, watch_lib.DEFAULT_ALLOWED)
+    codes = _list_setting(conn, WATCH_CODES, watch_lib.DEFAULT_CODE_WORDS)
+    since_day = data_since(conn)
+    chats = []
+    for offset in range(0, max_chats, 100):
+        page = client.chats(CHATTERFY_BOT_ID, 100, offset)
+        chats.extend(page)
+        if len(page) < 100:
+            break
+    active = [c for c in chats if ((c.get("last_message") or {}).get("created_at") or "") > cursor]
+    names = _sender_names(conn, client) if active else {}
+    newest, found, tagged = cursor, [], 0
+    for chat in active:
+        newest = max(newest, (chat.get("last_message") or {}).get("created_at") or "")
+        items = client.messages(chat["id"], 50)
+        for m in items:
+            at = m.get("created_at") or ""
+            if at <= cursor:
+                continue
+            newest = max(newest, at)
+            if m.get("sender_type") != "outcoming":
+                continue
+            for kind, match in watch_lib.check_text(m.get("content") or "", allowed):
+                sender = m.get("sender") or ""
+                sender_name = names.get(sender) or (sender[:8] if sender else "без автора (AI или сам Telegram-аккаунт)")
+                cur = conn.execute(
+                    "INSERT INTO watch_alerts(message_id, kind, found, chat_id, chat_name, sender_id, sender_name, text, message_at, found_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                    (m.get("id"), kind, match[:300], chat["id"], chat.get("name"), sender, sender_name,
+                     (m.get("content") or "")[:2000], at, now.isoformat()))
+                if getattr(cur, "rowcount", 1):
+                    found.append({"kind": kind, "match": match, "chat_id": chat["id"], "chat_name": chat.get("name"),
+                                  "sender_name": sender_name, "text": m.get("content") or ""})
+        created = (chat.get("created_at") or "")[:10]
+        if not since_day or created >= since_day:
+            try:
+                if _tag_channel_source(conn, chat, items, codes):
+                    tagged += 1
+            except Exception as exc:
+                print(f"watch: channel tag failed: {exc}")
+    set_setting(conn, WATCH_CURSOR, newest, "watch")
+    status = {"at": now.isoformat(), "chats": len(active), "found": len(found), "tagged": tagged, "error": None}
+    set_setting(conn, WATCH_STATUS, json.dumps(status), "watch")
+    conn.commit()
+    if found:
+        recipients = _alert_recipients(conn)
+        for f in found[:20]:
+            text = "\n".join([
+                f"🚨 Подозрительное сообщение: {f['kind']}",
+                f"Кто: {f['sender_name']}",
+                f"Клиент: {f['chat_name'] or '—'}",
+                f"Что нашли: {f['match']}",
+                "Текст: " + f["text"][:300],
+                _chat_link(f["chat_id"]),
+            ])
+            for chat_id in recipients:
+                send_telegram_message(chat_id, text)
+        conn.execute("UPDATE watch_alerts SET notified=1 WHERE notified=0")
+        conn.commit()
+    return status
+
+
+def _watch_once():
+    if not _watch_lock.acquire(blocking=False):
+        return {"status": "busy"}
+    try:
+        conn = db()
+        try:
+            try:
+                return run_watch(conn)
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                print(f"watch error: {err}")
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                set_setting(conn, WATCH_STATUS, json.dumps({"at": datetime.utcnow().isoformat(), "error": err[:400]}), "watch")
+                conn.commit()
+                return {"status": "error", "error": err}
+        finally:
+            conn.close()
+    finally:
+        _watch_lock.release()
+
+
+def _watch_loop():
+    import time
+    time.sleep(40)
+    while True:
+        _watch_once()
+        time.sleep(WATCH_LOOP_SECONDS)
+
+
+if os.getenv("DISABLE_WATCH_LOOP", "0") != "1":
+    threading.Thread(target=_watch_loop, daemon=True).start()
+
+
+class WatchSettings(BaseModel):
+    api_key: str | None = None
+    allowed: str | None = None
+    codes: str | None = None
+
+
+@app.get("/api/v1/watch")
+def watch_overview(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        try:
+            status = json.loads(get_setting(conn, WATCH_STATUS, "") or "{}")
+        except Exception:
+            status = {}
+        rows = conn.execute(
+            "SELECT message_id, kind, found AS match, chat_id, chat_name, sender_name, text, message_at FROM watch_alerts "
+            "ORDER BY message_at DESC LIMIT 100").fetchall()
+        alerts = [{**dict(r), "chat_link": _chat_link(r["chat_id"])} for r in rows]
+        by_sender = {}
+        for a in alerts:
+            by_sender[a["sender_name"] or "—"] = by_sender.get(a["sender_name"] or "—", 0) + 1
+        return {
+            "configured": bool(watch_key(conn)),
+            "key_from_env": bool(os.getenv("CHATTERFY_API_KEY")),
+            "status": status,
+            "allowed": "\n".join(_list_setting(conn, WATCH_ALLOWED, watch_lib.DEFAULT_ALLOWED)),
+            "codes": ", ".join(_list_setting(conn, WATCH_CODES, watch_lib.DEFAULT_CODE_WORDS)),
+            "alerts": alerts,
+            "by_sender": sorted(({"sender": k, "count": v} for k, v in by_sender.items()), key=lambda x: -x["count"]),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/settings/watch")
+def save_watch_settings(payload: WatchSettings, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        if payload.api_key is not None and payload.api_key.strip():
+            set_setting(conn, WATCH_KEY_SETTING, payload.api_key.strip(), admin)
+        if payload.allowed is not None:
+            set_setting(conn, WATCH_ALLOWED, payload.allowed.strip(), admin)
+        if payload.codes is not None:
+            set_setting(conn, WATCH_CODES, payload.codes.strip(), admin)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/watch/run")
+def watch_run_now(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+    finally:
+        conn.close()
+    return _watch_once()
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
