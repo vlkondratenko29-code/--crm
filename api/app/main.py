@@ -264,6 +264,8 @@ def init_db():
         """)
         # Personal Telegram notifications: user chat id, callback reminders, stage notices.
         add_column(conn, "crm_users", "tg_id", "TEXT")
+        # Operator's login email in Chatterfy: links a chat's assigned operator to a CRM user.
+        add_column(conn, "crm_users", "chatterfy_email", "TEXT")
         add_column(conn, "lead_work", "callback_at", "TEXT")
         add_column(conn, "lead_work", "callback_notified_at", "TEXT")
         conn.execute("""
@@ -606,6 +608,7 @@ class TeamUser(BaseModel):
     username: str
     role: str
     active: bool = True
+    chatterfy_email: str | None = None
 
 
 @app.get("/api/v1/users")
@@ -613,7 +616,7 @@ def list_users(x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
-        rows = conn.execute("SELECT username, role, active FROM crm_users ORDER BY username").fetchall()
+        rows = conn.execute("SELECT username, role, active, chatterfy_email FROM crm_users ORDER BY username").fetchall()
         return {"users": [dict(row) for row in rows]}
     finally:
         conn.close()
@@ -633,6 +636,9 @@ def upsert_user(payload: TeamUser, x_telegram_username: str = Depends(current_us
             "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
             (username, payload.role, payload.active),
         )
+        if payload.chatterfy_email is not None:
+            conn.execute("UPDATE crm_users SET chatterfy_email=%s WHERE username=%s",
+                         ((payload.chatterfy_email or "").strip().lower() or None, username))
         conn.commit()
         return {"status": "ok"}
     finally:
@@ -990,7 +996,8 @@ async def chatterfy_webhook(
     adset_name: str | None = None, utm_content: str | None = None, tracker_provider_type: str | None = None,
     tracker_campaign: str | None = None, tracker_source: str | None = None, tracker_domain_id: str | None = None,
     tracker_landing_id: str | None = None, tracker_source_name: str | None = None,
-    tracker_campaign_name: str | None = None, secret: str | None = None, phone: str | None = None
+    tracker_campaign_name: str | None = None, secret: str | None = None, phone: str | None = None,
+    operator_email: str | None = None, operator_name: str | None = None
 ):
     if CHATTERFY_WEBHOOK_SECRET:
         provided = secret or request.headers.get("x-webhook-secret") or ""
@@ -1077,6 +1084,9 @@ async def chatterfy_webhook(
                 source="chatterfy", broker_id=uid or clean_attribution_value(broker_id),
                 chat_id=chat_id, metadata={"click_id": click_id, "uid": uid}
             )
+        operator = (clean_attribution_value(operator_email) or "").strip().lower()
+        if operator and chat_id:
+            record_operator(conn, chat_id, normalized_email, operator)
         conn.commit()
     finally:
         conn.close()
@@ -2084,6 +2094,20 @@ LEAD_ROLES = ("admin", "head_buying", "handler")
 LEAD_MANAGER_ROLES = ("admin", "head_buying")
 
 
+def record_operator(conn, chat_id, email, operator_email):
+    """Chatterfy assigned this chat to an operator: make that operator the lead's handler in the CRM."""
+    row = conn.execute("SELECT email FROM chatterfy_leads WHERE chat_id=%s", (str(chat_id),)).fetchone()
+    key = lead_key_for((row["email"] if row else None) or email, chat_id)
+    user = conn.execute("SELECT username FROM crm_users WHERE lower(chatterfy_email)=%s AND active=TRUE",
+                        (operator_email,)).fetchone()
+    assignee = user["username"] if user else operator_email
+    conn.execute(
+        "INSERT INTO lead_work(lead_key, assignee, work_status, updated_at, updated_by) VALUES(%s,%s,'in_progress',%s,'chatterfy') "
+        "ON CONFLICT(lead_key) DO UPDATE SET assignee=excluded.assignee, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (key, assignee, datetime.utcnow().isoformat()),
+    )
+
+
 def lead_key_for(email, chat_id):
     email = (email or "").strip().lower()
     return email if email else f"chat:{chat_id}"
@@ -2183,8 +2207,12 @@ def build_leads(conn, viewer, accounts=None):
         stage = "LEAD"
         ftd_amount = None
         last_event_at = None
+        event_at = {}
         for ev in evs:
             t = str(ev["event_type"] or "").upper()
+            when = ev["event_date"] or ev["created_at"]
+            if when and (t not in event_at or str(when) < event_at[t]):
+                event_at[t] = str(when)
             if STAGE_ORDER.get(t, -1) > STAGE_ORDER[stage]:
                 stage = t
             if t == "FTD" and ev["amount"] is not None:
@@ -2214,6 +2242,8 @@ def build_leads(conn, viewer, accounts=None):
             "assignee": w.get("assignee"),
             "work_status": w.get("work_status") or "new",
             "callback_at": w.get("callback_at"),
+            "reg_at": event_at.get("REG"),
+            "ftd_at": event_at.get("FTD"),
             "notes": note_counts.get(key, 0),
             "last_activity": activity or None,
         })
@@ -2863,6 +2893,140 @@ def handlers_report(days: int = 7, x_telegram_username: str = Depends(current_us
     total["reg_to_ftd"] = round(total["ftd"] / total["reg"] * 100, 1) if total["reg"] else 0
     total["lead_to_ftd"] = round(total["ftd"] / total["leads"] * 100, 1) if total["leads"] else 0
     return {"days": days, "handlers": handlers, "unassigned": unassigned, "total": total}
+
+
+STATS_TZ_HOURS = 3  # Turkey and Moscow are both UTC+3: "today" means their today.
+
+
+def _stat_day(value):
+    """Calendar day (YYYY-MM-DD) of a timestamp in the team's time zone."""
+    if not value:
+        return None
+    value = str(value)
+    if len(value) <= 10:
+        return value[:10]
+    try:
+        d = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if d.tzinfo:
+            d = d.astimezone(timezone.utc).replace(tzinfo=None)
+        return (d + timedelta(hours=STATS_TZ_HOURS)).date().isoformat()
+    except ValueError:
+        return value[:10]
+
+
+def _min_day(*values):
+    days = [d for d in (_stat_day(v) for v in values) if d]
+    return min(days) if days else None
+
+
+@app.get("/api/v1/stats/overview")
+def stats_overview(days: int = 7, x_telegram_username: str = Depends(current_username)):
+    """One screen of numbers: leads -> registrations -> deposits, by day, handler and campaign, plus a feed.
+
+    Handlers see only their own clients (with amounts); SEO sees counts without money.
+    """
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        me_row = conn.execute("SELECT chatterfy_email FROM crm_users WHERE lower(username)=%s",
+                              (user["username"].lower(),)).fetchone()
+        names = {(r["chatterfy_email"] or "").lower(): r["username"] for r in conn.execute(
+            "SELECT username, chatterfy_email FROM crm_users WHERE chatterfy_email IS NOT NULL").fetchall()}
+    finally:
+        conn.close()
+
+    role = user["role"]
+    show_money = role != "seo"
+    if role == "handler":
+        mine = {user["username"].lower()} | ({me_row["chatterfy_email"].lower()} if me_row and me_row["chatterfy_email"] else set())
+        leads = [x for x in leads if (x.get("assignee") or "").lower() in mine]
+
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    start = (today - timedelta(days=days - 1)).isoformat() if days and days > 0 else ""
+    span = min(days, 31) if days and days > 0 else 14
+    day_list = [(today - timedelta(days=i)).isoformat() for i in range(span - 1, -1, -1)]
+
+    def handler_name(x):
+        a = (x.get("assignee") or "").lower()
+        return names.get(a, x.get("assignee")) if a else None
+
+    rows = []
+    for x in leads:
+        accs = x.get("matched_accounts") or []
+        rank = STAGE_ORDER.get(x["stage"], 0)
+        has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
+        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs])
+        is_reg = bool(reg_day) or rank >= STAGE_ORDER["REG"] or bool(accs)
+        ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
+        is_ftd = bool(ftd_day) or rank >= STAGE_ORDER["FTD"] or has_dep
+        if is_ftd and not ftd_day:
+            ftd_day = _stat_day(x.get("last_activity"))
+        if is_reg and not reg_day:
+            reg_day = ftd_day or _stat_day(x.get("last_activity"))
+        deposit = sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
+        rows.append({"x": x, "lead_day": _stat_day(x.get("first_seen_at")), "reg_day": reg_day if is_reg else None,
+                     "ftd_day": ftd_day if is_ftd else None, "deposit": deposit if is_ftd else 0.0,
+                     "handler": handler_name(x), "campaign": x.get("campaign") or "Без кампании"})
+
+    def in_period(day):
+        return bool(day) and day >= start
+
+    def bucket():
+        return {"leads": 0, "reg": 0, "ftd": 0, "deposits": 0.0}
+
+    def add(b, r):
+        b["leads"] += int(in_period(r["lead_day"]))
+        b["reg"] += int(in_period(r["reg_day"]))
+        if in_period(r["ftd_day"]):
+            b["ftd"] += 1
+            b["deposits"] += r["deposit"]
+
+    def finish(b):
+        b["deposits"] = round(b["deposits"], 2) if show_money else None
+        b["lead_to_reg"] = round(b["reg"] / b["leads"] * 100, 1) if b["leads"] else 0
+        b["reg_to_ftd"] = round(b["ftd"] / b["reg"] * 100, 1) if b["reg"] else 0
+        b["avg_ftd"] = round(b["deposits"] / b["ftd"], 2) if show_money and b["ftd"] else None
+        return b
+
+    summary = bucket()
+    daily = {d: bucket() for d in day_list}
+    by_handler, by_campaign = {}, {}
+    feed = []
+    for r in rows:
+        add(summary, r)
+        for key, field in (("leads", "lead_day"), ("reg", "reg_day"), ("ftd", "ftd_day")):
+            d = r[field]
+            if d in daily:
+                daily[d][key] += 1
+                if key == "ftd":
+                    daily[d]["deposits"] += r["deposit"]
+        if r["reg_day"] or r["ftd_day"]:
+            add(by_handler.setdefault(r["handler"] or "", bucket()), r)
+        add(by_campaign.setdefault(r["campaign"], bucket()), r)
+        x = r["x"]
+        for kind, d in (("REG", r["reg_day"]), ("FTD", r["ftd_day"])):
+            if in_period(d):
+                feed.append({"type": kind, "day": d, "name": x.get("name"), "tg_username": x.get("tg_username"),
+                             "handler": r["handler"], "campaign": x.get("campaign"), "lead_key": x["lead_key"],
+                             "amount": (round(r["deposit"], 2) if show_money else None) if kind == "FTD" else None})
+
+    handlers = [{"handler": k or None, **finish(v)} for k, v in by_handler.items() if v["reg"] or v["ftd"]]
+    handlers.sort(key=lambda h: (h["handler"] is None, -h["ftd"], -h["reg"]))
+    campaigns = [{"campaign": k, **finish(v)} for k, v in by_campaign.items() if v["leads"] or v["reg"] or v["ftd"]]
+    campaigns.sort(key=lambda c: (-c["ftd"], -c["reg"], -c["leads"]))
+    feed.sort(key=lambda e: (e["day"], e["type"] == "FTD"), reverse=True)
+    return {
+        "days": days,
+        "role": role,
+        "scope": "mine" if role == "handler" else "all",
+        "show_money": show_money,
+        "summary": finish(summary),
+        "daily": [{"date": d, **finish(daily[d])} for d in day_list],
+        "by_handler": handlers,
+        "by_campaign": campaigns[:40],
+        "feed": feed[:60],
+    }
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
