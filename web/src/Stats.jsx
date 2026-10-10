@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
+import Buying from "./Buying.jsx";
 
 // One statistics screen for every role. The backend scopes the data:
 // handlers get only their own clients, SEO gets counts without money.
 const PERIODS = [["1", "Сегодня"], ["7", "7 дней"], ["30", "30 дней"], ["0", "Всё время"]];
-const TABS = [["handlers", "Обработчики"], ["campaigns", "Кампании"], ["feed", "Реги и депы"]];
+const TABS = [["buying", "Баинг"], ["handlers", "Обработчики"], ["campaigns", "Кампании"], ["feed", "Реги и депы"]];
 
 const money = v => v == null ? "—" : "$" + Number(v).toLocaleString("ru-RU", { maximumFractionDigits: 0 });
 const who = h => (h.includes("@") ? h : "@" + h);
@@ -14,7 +15,7 @@ function Daily({ rows, showMoney }) {
   const max = Math.max(1, ...rows.map(r => Math.max(r.leads, r.reg, r.ftd)));
   return (
     <div className="st-daily">
-      {rows.slice().reverse().map(r => (
+      {rows.slice(-14).reverse().map(r => (
         <div className="st-day" key={r.date}>
           <span className="st-date">{day(r.date)}</span>
           <div className="st-bars">
@@ -45,7 +46,7 @@ function Row({ title, sub, r, showMoney }) {
 
 export default function Stats({ username }) {
   const [days, setDays] = useState("7");
-  const [tab, setTab] = useState("handlers");
+  const [tab, setTab] = useState("buying");
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
 
@@ -59,7 +60,8 @@ export default function Stats({ username }) {
   const s = data?.summary;
   const money_ = data?.show_money;
   const mine = data?.scope === "mine";
-  const tabs = TABS.filter(([k]) => !(mine && k === "handlers"));
+  const canBuy = data?.role === "admin" || data?.role === "head_buying";
+  const tabs = TABS.filter(([k]) => !(mine && k === "handlers") && (k !== "buying" || canBuy) && !(canBuy && k === "campaigns"));
   const active = tabs.some(([k]) => k === tab) ? tab : tabs[0][0];
 
   return (
@@ -82,6 +84,8 @@ export default function Stats({ username }) {
         <Daily rows={data.daily} showMoney={money_} />
 
         <div className="st-tabs">{tabs.map(([k, l]) => <button key={k} className={active === k ? "selected" : ""} onClick={() => setTab(k)}>{l}</button>)}</div>
+
+        {active === "buying" && <Buying username={username} days={days} />}
 
         {active === "handlers" && <div className="st-list">
           {data.by_handler.map(h => <Row key={h.handler || "none"} title={h.handler ? who(h.handler) : "Без обработчика"} r={{ ...h, leads: null }}

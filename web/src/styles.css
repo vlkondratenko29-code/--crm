@@ -379,3 +379,21 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .st-event small{color:#7f8b9e;font-size:11px}
 .st-badge{flex:0 0 auto;font-size:10px;font-weight:800;padding:4px 7px;border-radius:7px;background:#121a25;border:1px solid #263244}
 .team-form input + input{margin-top:0}
+
+/* --- buying --- */
+.t-bad{color:#ff9f8a}
+.buy-upload{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px;border-radius:12px;background:#0d131b;border:1px solid #2a3a52}
+.buy-upload b{display:block;font-size:13px}.buy-upload small{color:#7f8b9e;font-size:11px}
+.buy-upload .upload-btn{flex:0 0 auto}
+.buy-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:12px 0 4px}
+.buy-kpis div{padding:10px;background:rgba(7,11,17,.58);border:1px solid #222d3b;border-radius:12px}
+.buy-kpis span{display:block;color:#7f8a9b;font-size:10px;text-transform:uppercase}
+.buy-kpis b{display:block;margin-top:4px;font-size:17px}
+.buy-row{padding:11px 12px;border-radius:12px;background:#0d131b;border:1px solid #222d3b}
+.buy-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}
+.buy-head b{display:block;font-size:13px;word-break:break-word}.buy-head small{color:#7f8b9e;font-size:11px}
+.buy-flag{flex:0 0 auto;align-self:flex-start;font-size:10px;font-weight:700;color:#f1c76a;border:1px solid #56461f;border-radius:999px;padding:2px 7px}
+.buy-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px 6px}
+.buy-grid span{font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.buy-grid small{display:block;font-size:9px;color:#7f8b9e;font-weight:600;text-transform:uppercase;white-space:normal}
+@media(max-width:420px){.buy-grid{grid-template-columns:repeat(3,1fr)}}
