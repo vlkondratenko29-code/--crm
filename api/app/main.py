@@ -786,6 +786,51 @@ def lead_label(lead):
 
 
 HANDLER_NOTICES_SEEDED = "handler_notices_seeded"
+AUTO_ASSIGN_KEY = "auto_assign_on_reg"  # "1" (default) = give every new registration to a handler
+
+
+def pick_handler(conn):
+    """Least-loaded active handler; handlers who opened the Mini App (reachable by the bot) go first."""
+    handlers = [dict(r) for r in conn.execute(
+        "SELECT username, tg_id FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+    if not handlers:
+        return None
+    load = {r["assignee"].lower(): int(r["c"]) for r in conn.execute(
+        "SELECT assignee, COUNT(*) AS c FROM lead_work WHERE assignee IS NOT NULL "
+        "AND work_status NOT IN ('won','lost') GROUP BY assignee").fetchall() if r["assignee"]}
+    last = get_setting(conn, "auto_assign_last", "")
+    def key(h):
+        name = h["username"].lower()
+        return (0 if h["tg_id"] else 1, load.get(name, 0), 1 if name == last else 0, name)
+    choice = sorted(handlers, key=key)[0]["username"].lower()
+    set_setting(conn, "auto_assign_last", choice, "system")
+    return choice
+
+
+def auto_assign(conn, lead, reason):
+    """Give an unassigned lead to a handler and tell them. Returns the handler or None."""
+    if get_setting(conn, AUTO_ASSIGN_KEY, "1") != "1":
+        return None
+    handler = pick_handler(conn)
+    if not handler:
+        return None
+    now = datetime.utcnow().isoformat()
+    row = conn.execute("SELECT assignee, work_status FROM lead_work WHERE lead_key=%s", (lead["lead_key"],)).fetchone()
+    if row and row["assignee"]:
+        return None
+    status = (row["work_status"] if row else None) or "new"
+    conn.execute(
+        "INSERT INTO lead_work(lead_key, assignee, work_status, updated_at, updated_by) VALUES(%s,%s,%s,%s,%s) "
+        "ON CONFLICT(lead_key) DO UPDATE SET assignee=excluded.assignee, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+        (lead["lead_key"], handler, status, now, "auto"),
+    )
+    lead["assignee"] = handler
+    lines = [f"🆕 Тебе передан клиент: {lead_label(lead)}", reason]
+    if lead.get("chat_link"):
+        lines.append(lead["chat_link"])
+    lines.append("Напиши ему в ближайшие 15 минут — пока он тёплый.")
+    notify_user(conn, handler, "\n".join(lines))
+    return handler
 
 
 def run_stage_notices(conn):
@@ -814,7 +859,13 @@ def run_stage_notices(conn):
                 (x["lead_key"], ev, x.get("assignee"), now),
             )
             done.add((x["lead_key"], ev))
-            if seeding or not x.get("assignee"):
+            if seeding:
+                continue
+            if not x.get("assignee"):
+                reason = ("Он внёс депозит — свяжись и поздравь." if ev == "FTD"
+                          else "Он только что зарегистрировался у брокера. Обсуди с ним старт.")
+                if auto_assign(conn, x, reason):
+                    sent += 1
                 continue
             text = (f"💰 Твой клиент внёс депозит: {lead_label(x)}" if ev == "FTD"
                     else f"📝 Твой клиент зарегистрировался: {lead_label(x)}\nДожми до первого депозита.")
@@ -846,6 +897,18 @@ def run_callback_reminders(conn):
     return sent
 
 
+def _stage_notices_now():
+    """Assign and notify right after a REG/FTD webhook instead of waiting for the loop."""
+    try:
+        conn = db()
+        try:
+            run_stage_notices(conn)
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"stage notices failed: {type(exc).__name__}: {exc}")
+
+
 NOTIFY_LOOP_SECONDS = int(os.getenv("NOTIFY_LOOP_SECONDS", "120"))
 
 
@@ -867,6 +930,32 @@ def _notify_loop():
 
 if TELEGRAM_BOT_TOKEN and os.getenv("DISABLE_NOTIFY_LOOP", "0") != "1":
     threading.Thread(target=_notify_loop, daemon=True).start()
+
+
+class AutoAssignSetting(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/v1/settings/auto-assign")
+def get_auto_assign(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        return {"enabled": get_setting(conn, AUTO_ASSIGN_KEY, "1") == "1"}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/settings/auto-assign")
+def set_auto_assign(payload: AutoAssignSetting, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        set_setting(conn, AUTO_ASSIGN_KEY, "1" if payload.enabled else "0", admin)
+        conn.commit()
+        return {"enabled": payload.enabled}
+    finally:
+        conn.close()
 
 
 @app.post("/api/v1/notify/test")
@@ -994,6 +1083,8 @@ async def chatterfy_webhook(
 
     if event_is_new and str(broker_event).upper() in NOTIFY_EVENTS:
         notify_event(str(broker_event).upper(), normalized_email, to_float(deposit_amount), merged_attr)
+    if event_is_new:
+        threading.Thread(target=_stage_notices_now, daemon=True).start()
 
     return {
         "status": "ok",
@@ -2553,6 +2644,10 @@ def push_after_import():
     try:
         conn = db()
         try:
+            try:
+                run_stage_notices(conn)
+            except Exception as exc:
+                print(f"stage notices after import failed: {type(exc).__name__}: {exc}")
             return run_chatterfy_push(conn)
         finally:
             conn.close()
