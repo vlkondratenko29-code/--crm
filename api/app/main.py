@@ -1181,6 +1181,8 @@ def parse_chatterfy_export(raw: bytes):
     c_id, c_name, c_user = col("Telegram ID", "chat_id", "chatId"), col("Name"), col("Username")
     c_tags, c_started, c_status, c_step = col("Tags"), col("Started"), col("Status"), col("Step")
     c_last = col("Last User Message")
+    # Custom field where operators/bot store the client's broker UID or email.
+    c_contact = col("UID / email клиента", "UID / email", "UID", "Email клиента", "Email")
     if not c_id:
         raise HTTPException(status_code=400, detail="This does not look like a Chatterfy users export (no Telegram ID column)")
     leads = []
@@ -1208,6 +1210,7 @@ def parse_chatterfy_export(raw: bytes):
             "last_message": stamp(c_last),
             "status": (row.get(c_status) or "").strip() or None if c_status else None,
             "step": (row.get(c_step) or "").strip() or None if c_step else None,
+            "contact": (str(row.get(c_contact) or "").strip() or None) if c_contact else None,
         })
     return leads
 
@@ -1244,6 +1247,13 @@ async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegra
                     "updated_at=COALESCE(excluded.updated_at, chatterfy_leads.updated_at)",
                     (lead["chat_id"], json.dumps(attr, ensure_ascii=False), lead["started"] or now, lead["last_message"]),
                 )
+                contact = lead.get("contact")
+                uid = broker_lib.normalize_account_id(contact)
+                email = broker_lib.normalize_email(contact) if contact and "@" in contact else None
+                if uid:
+                    conn.execute("UPDATE chatterfy_leads SET uid=%s WHERE chat_id=%s", (uid, lead["chat_id"]))
+                if email:
+                    conn.execute("UPDATE chatterfy_leads SET email=COALESCE(email, %s) WHERE chat_id=%s", (email, lead["chat_id"]))
                 if row:
                     updated += 1
                 else:
