@@ -1523,6 +1523,35 @@ def search_clients(q: str, x_telegram_username: str = Depends(current_username))
         ORDER BY registration_date DESC NULLS LAST
         LIMIT 100
     """, (term, term)).fetchall()
+    account_rows = [dict(a) for a in account_rows]
+
+    # Reports uploaded on the reconciliation screen (any broker, e.g. FxPro "Clients")
+    # live in broker_accounts. Show them in search too, shaped like fxpro_accounts rows.
+    phone_sql, params = "", [term, term, term]
+    if len(digits) >= 5:
+        phone_sql = " OR coalesce(phone,'') LIKE %s"
+        params.append("%" + digits[-10:] + "%")
+    broker_rows = conn.execute(f"""
+        SELECT * FROM broker_accounts
+        WHERE lower(coalesce(email,'')) LIKE %s
+           OR lower(account_id) LIKE %s
+           OR lower(coalesce(label,'')) LIKE %s{phone_sql}
+        ORDER BY registration_date DESC NULLS LAST
+        LIMIT 100
+    """, tuple(params)).fetchall()
+    known_accounts = {((a["email"] or "").strip().lower(), str(a["login"])) for a in account_rows}
+    for b in broker_rows:
+        login = None if "@" in str(b["account_id"]) or str(b["account_id"]).startswith("tel:") else str(b["account_id"])
+        email_key = (b["email"] or "").strip().lower()
+        if (email_key, login) in known_accounts or (login is None and any(e == email_key for e, _ in known_accounts)):
+            continue
+        known_accounts.add((email_key, login))
+        account_rows.append({
+            "login": login, "email": email_key or None, "name": b["name"], "country": b["country"],
+            "registration_date": b["registration_date"], "deposits": b["deposits"], "withdrawals": b["withdrawals"],
+            "latest_balance": b["balance"], "last_trade_date": b["last_trade_date"], "label": b["label"],
+            "phone": b["phone"], "broker": b["broker"], "ftd_date": b["ftd_date"], "ftd_amount": b["ftd_amount"],
+        })
 
     # Chatterfy leads are searchable even before FxPro has a matching account.
     # This keeps a newly registered/FTD lead visible in CRM instead of returning
