@@ -405,3 +405,17 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .watch-settings input,.watch-settings textarea{background:#121b26;border:1px solid #2a3647;border-radius:9px;color:#e7edf5;padding:9px 10px;font-size:13px;font-family:inherit}
 .link-btn{margin-top:14px;background:none;border:none;color:#7fb2ff;font-size:13px;padding:0;cursor:pointer;align-self:flex-start}
 .watch-event small{word-break:break-all}
+
+/* --- payroll & buyer reports --- */
+.pay-extra{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:end;margin-top:10px}
+.watch-settings .pay-extra{margin-top:0;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+.pay-extra label{min-width:0;display:flex;flex-direction:column;gap:6px;font-size:11px;color:#9eacbf}
+.pay-extra input,.watch-settings select{background:#121b26;border:1px solid #2a3647;border-radius:9px;color:#e7edf5;padding:9px 10px;font-size:13px;font-family:inherit;min-width:0;width:100%;box-sizing:border-box}
+.pay-extra .upload-btn{margin-top:0}
+.pay-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+.pay-actions .link-btn{margin-top:0}
+.mini-btn{padding:5px 10px;border-radius:8px;background:#121a25;border:1px solid #293748;color:#b9c4d3;font-size:11px;font-weight:700;cursor:pointer}
+.mini-btn.ok{border-color:#2f6b4f;color:#8fe0b5}.mini-btn.bad{border-color:#6b3a2f;color:#ff9f8a}
+.month-switch button:disabled{opacity:.35}
+.filter-switch{margin-top:12px}
+@media(max-width:420px){.pay-extra{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pay-extra .upload-btn{grid-column:1/-1}}

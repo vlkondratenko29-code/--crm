@@ -5,6 +5,8 @@ import { authHeaders } from "./api.js";
 import Leads, { LeadCard } from "./Leads.jsx";
 import Stats from "./Stats.jsx";
 import Watch from "./Watch.jsx";
+import Payroll from "./Payroll.jsx";
+import BuyerReports from "./BuyerReports.jsx";
 import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
@@ -54,18 +56,19 @@ function App() {
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   // `main` tabs sit in the bottom bar; the rest open from «Ещё».
   const roleMeta = {
-    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
-    head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "traffic"], more: ["clients", "reconcile", "finance"] },
+    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["payroll", "reports", "watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
+    head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "reports"], more: ["traffic", "clients", "reconcile", "finance"] },
+    buyer: { label: "БАЕР", title: "Отчёты по расходу", main: ["reports"], more: [] },
     seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: [] },
-    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] },
+    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "payroll", "clients"], more: [] },
   }[effectiveUser.role] || { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] };
   roleMeta.tabs = [...roleMeta.main, ...roleMeta.more];
   const canSee = (id) => roleMeta.tabs.includes(id);
   const leadRoles = ["admin", "head_buying", "handler"];
   const [moreOpen, setMoreOpen] = useState(false);
   const [openLead, setOpenLead] = useState(null);
-  // If a role switch (preview) hides the current tab, fall back to the home screen.
-  React.useEffect(() => { if (!canSee(tab)) setTab("stats"); }, [effectiveUser.role]);
+  // If a role switch (preview) hides the current tab, fall back to the role's first screen.
+  React.useEffect(() => { if (!canSee(tab)) setTab(roleMeta.main[0]); }, [effectiveUser.role]);
   const buyingRows = useMemo(() => (stats.chatterfy?.attribution || []).filter(x => (buyingCampaign === "all" || x.campaign === buyingCampaign) && (buyingSource === "all" || x.source === buyingSource)), [stats.chatterfy?.attribution, buyingCampaign, buyingSource]);
   const buyingTotals = useMemo(() => buyingRows.reduce((a, x) => ({ leads: a.leads + Number(x.leads || 0), reg: a.reg + Number(x.reg || 0), ftd: a.ftd + Number(x.ftd || 0), ft: a.ft + Number(x.ft || 0), deposits: a.deposits + Number(x.deposits || 0) }), { leads: 0, reg: 0, ftd: 0, ft: 0, deposits: 0 }), [buyingRows]);
 
@@ -223,7 +226,7 @@ function App() {
   return (
     <main className={"app role-" + effectiveUser.role}>
       <header>
-        <div><p className="eyebrow">BROKER CRM</p><h1>{TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 10.10</p></div>
+        <div><p className="eyebrow">BROKER CRM</p><h1>{TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 13.10</p></div>
         <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
       </header>
 
@@ -347,6 +350,8 @@ function App() {
       </section>}
       {tab === "stats" && canSee("stats") && <Stats username={effectiveUser.username} />}
       {tab === "watch" && canSee("watch") && <Watch username={effectiveUser.username} />}
+      {tab === "payroll" && canSee("payroll") && <Payroll username={effectiveUser.username} />}
+      {tab === "reports" && canSee("reports") && <BuyerReports username={effectiveUser.username} />}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">КОМАНДА</p>
         <h2>Доступ команды</h2>
@@ -357,6 +362,7 @@ function App() {
             <option value="handler">Обработчик</option>
             <option value="seo">SEO</option>
             <option value="head_buying">Хэд баинга</option>
+            <option value="buyer">Баер</option>
             <option value="admin">Админ</option>
           </select>
           <button className="primary" type="button" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Добавляю…" : "Добавить"}</button>
@@ -493,12 +499,14 @@ function App() {
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
   finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",
+  payroll: "Депы и ЗП", reports: "Отчёты",
 };
 const TAB_ICONS = {
   dashboard: "◉", leads: "☷", reconcile: "⚖", clients: "⌕", stats: "◈",
   finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥", watch: "🛡",
+  payroll: "💵", reports: "▤",
 };
-const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", seo: "SEO", handler: "Обработчик" };
+const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", buyer: "Баер", seo: "SEO", handler: "Обработчик" };
 const STATUS_LABELS = { "Chatterfy lead": "Лид Chatterfy", "FxPro account": "Счёт FxPro" };
 
 function clientTitle(x) {
