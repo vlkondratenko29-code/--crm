@@ -39,7 +39,7 @@ NOTIFY_EVENTS = {x.strip().upper() for x in os.getenv("NOTIFY_EVENTS", "FTD").sp
 ALLOW_USERNAME_HEADER = os.getenv("ALLOW_USERNAME_HEADER", "0" if TELEGRAM_BOT_TOKEN else "1") == "1"
 
 PRIMARY_ADMINS = ("jokwq", "nodari777")
-ROLES = {"admin", "head_buying", "seo", "handler"}
+ROLES = {"admin", "head_buying", "seo", "handler", "buyer"}
 WORK_STATUSES = ("new", "in_progress", "callback", "no_answer", "won", "lost")
 STAGE_ORDER = {"LEAD": 0, "REG": 1, "FTD": 2, "FT": 3}
 
@@ -309,6 +309,52 @@ def init_db():
                 found_at TEXT,
                 notified INTEGER DEFAULT 0,
                 PRIMARY KEY (message_id, kind)
+            )
+        """)
+        # Payroll: deposits handlers enter themselves; an admin approves them before they count.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS handler_deposits (
+                id TEXT PRIMARY KEY,
+                handler TEXT NOT NULL,
+                day TEXT NOT NULL,
+                client TEXT NOT NULL,
+                amount DOUBLE PRECISION NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'FTD',
+                status TEXT NOT NULL DEFAULT 'pending',
+                comment TEXT,
+                created_at TEXT,
+                created_by TEXT,
+                reviewed_at TEXT,
+                reviewed_by TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_handler_deposits_day ON handler_deposits(day)")
+        # Per handler per month: video reviews and an optional manual dialog count for CR.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS payroll_extras (
+                handler TEXT NOT NULL,
+                month TEXT NOT NULL,
+                video_reviews INTEGER NOT NULL DEFAULT 0,
+                dialogs_override INTEGER,
+                updated_at TEXT,
+                updated_by TEXT,
+                PRIMARY KEY (handler, month)
+            )
+        """)
+        # Daily buyer reports: one row per buyer + day + campaign.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS buyer_reports (
+                id TEXT PRIMARY KEY,
+                buyer TEXT NOT NULL,
+                day TEXT NOT NULL,
+                campaign TEXT NOT NULL,
+                spend DOUBLE PRECISION NOT NULL DEFAULT 0,
+                accounts INTEGER,
+                bans INTEGER,
+                comment TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                UNIQUE (buyer, day, campaign)
             )
         """)
         for admin_username in PRIMARY_ADMINS:
@@ -664,7 +710,7 @@ def upsert_user(payload: TeamUser, x_telegram_username: str = Depends(current_us
         username = payload.username.lstrip("@").strip().lower()
         if not username:
             raise HTTPException(status_code=400, detail="Username is required")
-        if payload.role not in {"admin", "head_buying", "seo", "handler"}:
+        if payload.role not in ROLES:
             raise HTTPException(status_code=400, detail="Invalid role")
         conn.execute(
             "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
@@ -3617,6 +3663,495 @@ def watch_run_now(x_telegram_username: str = Depends(current_username)):
     finally:
         conn.close()
     return _watch_once()
+
+
+# ---------------------------------------------------------------------------
+# Payroll: handlers enter their deposits, admin approves, CRM computes salary
+# ---------------------------------------------------------------------------
+
+PAYROLL_RULES_KEY = "payroll_rules"
+PAYROLL_DEFAULT_RULES = {
+    "fix": 200,                 # $ per month
+    # % of own approved sales by monthly CR dialog -> FTD; the highest tier whose "from" is reached applies.
+    "tiers": [{"from": 0, "rate": 4}, {"from": 10, "rate": 5}, {"from": 12, "rate": 6}],
+    "video_bonus": 10,          # $ per video review
+    "week_qftd": 10,            # qFTD per week needed for the weekly bonus
+    "week_bonus": 50,           # $
+    "qftd_min": 0,              # FTD of at least this amount counts as qFTD
+    "best_bonus": 20,           # $ to the handler with the biggest sales of the month
+}
+DEPOSIT_KINDS = ("FTD", "REDEP")
+DEPOSIT_STATUSES = ("pending", "approved", "rejected")
+
+
+def payroll_rules(conn):
+    try:
+        saved = json.loads(get_setting(conn, PAYROLL_RULES_KEY, "") or "{}")
+    except Exception:
+        saved = {}
+    return {**PAYROLL_DEFAULT_RULES, **{k: v for k, v in saved.items() if k in PAYROLL_DEFAULT_RULES}}
+
+
+def _month_bounds(month):
+    try:
+        start = datetime.strptime(month + "-01", "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Месяц в формате ГГГГ-ММ")
+    end = (start.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    return start, end
+
+
+def _current_month():
+    return (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).strftime("%Y-%m")
+
+
+def cr_rate(cr, tiers):
+    rate = 0
+    for t in sorted(tiers, key=lambda t: float(t["from"])):
+        if (cr or 0) >= float(t["from"]):
+            rate = float(t["rate"])
+    return rate
+
+
+def compute_payroll(month, handlers, deposits, dialogs, extras, rules):
+    """Salary per handler for one month.
+
+    deposits: approved rows {handler, day, amount, kind} from the month and the 6 days before it,
+    so a week that started in the previous month is counted whole. A week's bonus belongs to the
+    month its Sunday falls in, so every week is paid exactly once.
+    """
+    start, end = _month_bounds(month)
+    s, e = start.isoformat(), end.isoformat()
+    rows = {h: {"handler": h, "sales": 0.0, "ftd": 0, "redep": 0, "dialogs": dialogs.get(h, 0),
+                "dialogs_auto": dialogs.get(h, 0), "video_reviews": 0, "weeks": []} for h in handlers}
+    weeks = {}
+    for d in deposits:
+        h = d["handler"]
+        if h not in rows:
+            continue
+        day = str(d["day"])[:10]
+        amount = float(d["amount"] or 0)
+        if s <= day <= e:
+            rows[h]["sales"] += amount
+            rows[h]["ftd" if d["kind"] == "FTD" else "redep"] += 1
+        if d["kind"] == "FTD" and amount >= float(rules["qftd_min"] or 0):
+            monday = (datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=datetime.strptime(day, "%Y-%m-%d").weekday()))
+            weeks.setdefault((h, monday), 0)
+            weeks[(h, monday)] += 1
+    for (h, monday), count in sorted(weeks.items(), key=lambda x: x[0][1]):
+        sunday = monday + timedelta(days=6)
+        if s <= sunday.isoformat() <= e:
+            rows[h]["weeks"].append({"from": monday.isoformat(), "to": sunday.isoformat(), "qftd": count,
+                                     "bonus": count >= int(rules["week_qftd"])})
+    for h, x in extras.items():
+        if h in rows:
+            rows[h]["video_reviews"] = int(x.get("video_reviews") or 0)
+            if x.get("dialogs_override") is not None:
+                rows[h]["dialogs"] = int(x["dialogs_override"])
+    best = max((r["sales"] for r in rows.values()), default=0)
+    out = []
+    for r in rows.values():
+        r["cr"] = round(r["ftd"] / r["dialogs"] * 100, 2) if r["dialogs"] else None
+        r["rate"] = cr_rate(r["cr"], rules["tiers"])
+        r["percent_pay"] = round(r["sales"] * r["rate"] / 100, 2)
+        r["video_pay"] = r["video_reviews"] * float(rules["video_bonus"])
+        r["week_pay"] = sum(1 for w in r["weeks"] if w["bonus"]) * float(rules["week_bonus"])
+        r["best"] = best > 0 and r["sales"] == best
+        r["best_pay"] = float(rules["best_bonus"]) if r["best"] else 0.0
+        r["fix"] = float(rules["fix"])
+        r["sales"] = round(r["sales"], 2)
+        r["total"] = round(r["fix"] + r["percent_pay"] + r["video_pay"] + r["week_pay"] + r["best_pay"], 2)
+        out.append(r)
+    out.sort(key=lambda r: (-r["sales"], r["handler"]))
+    return out
+
+
+def _handler_dialogs(conn, month, handlers):
+    """Dialogs per handler in the month: leads assigned to them in Chatterfy that wrote that month."""
+    start, end = _month_bounds(month)
+    s, e = start.isoformat(), end.isoformat()
+    alias = {}
+    for r in conn.execute("SELECT username, chatterfy_email FROM crm_users").fetchall():
+        alias[r["username"].lower()] = r["username"]
+        if r["chatterfy_email"]:
+            alias[r["chatterfy_email"].lower()] = r["username"]
+    counts = {h: 0 for h in handlers}
+    for x in build_leads(conn, {"role": "admin", "username": "system"}):
+        h = alias.get((x.get("assignee") or "").lower())
+        day = _stat_day(x.get("dialog_at") or x.get("first_seen_at"))
+        if h in counts and day and s <= day <= e:
+            counts[h] += 1
+    return counts
+
+
+def require_payroll_access(username, conn):
+    user = require_access(username, conn)
+    if user["role"] not in ("admin", "handler"):
+        raise HTTPException(status_code=403, detail="Только обработчики и админ")
+    return user
+
+
+class HandlerDeposit(BaseModel):
+    day: str
+    client: str
+    amount: float
+    kind: str = "FTD"
+    comment: str | None = None
+    handler: str | None = None  # admin can enter a deposit for a handler
+
+
+class DepositReview(BaseModel):
+    status: str
+
+
+class PayrollExtra(BaseModel):
+    handler: str
+    month: str
+    video_reviews: int | None = None
+    dialogs_override: int | None = None
+    clear_override: bool = False
+
+
+def _clean_deposit(payload):
+    if payload.kind not in DEPOSIT_KINDS:
+        raise HTTPException(status_code=400, detail="Тип: FTD или REDEP")
+    if not _parse_day(payload.day):
+        raise HTTPException(status_code=400, detail="Дата в формате ГГГГ-ММ-ДД")
+    if payload.amount is None or payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть больше нуля")
+    if not payload.client.strip():
+        raise HTTPException(status_code=400, detail="Укажи клиента")
+    return _parse_day(payload.day).isoformat(), payload.client.strip()[:200], round(float(payload.amount), 2)
+
+
+@app.get("/api/v1/payroll/deposits")
+def list_handler_deposits(month: str = "", handler: str = "", x_telegram_username: str = Depends(current_username)):
+    month = month or _current_month()
+    start, end = _month_bounds(month)
+    conn = db()
+    try:
+        user = require_payroll_access(x_telegram_username, conn)
+        sql, params = "SELECT * FROM handler_deposits WHERE day>=%s AND day<=%s", [start.isoformat(), end.isoformat()]
+        if user["role"] == "handler":
+            sql += " AND lower(handler)=%s"
+            params.append(user["username"].lower())
+        elif handler:
+            sql += " AND lower(handler)=%s"
+            params.append(handler.lstrip("@").lower())
+        rows = [dict(r) for r in conn.execute(sql + " ORDER BY day DESC, created_at DESC", tuple(params)).fetchall()]
+        handlers = [r["username"] for r in conn.execute(
+            "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+    finally:
+        conn.close()
+    return {"month": month, "rows": rows, "handlers": handlers, "can_review": user["role"] == "admin",
+            "pending": sum(1 for r in rows if r["status"] == "pending")}
+
+
+@app.post("/api/v1/payroll/deposits")
+def add_handler_deposit(payload: HandlerDeposit, x_telegram_username: str = Depends(current_username)):
+    day, client, amount = _clean_deposit(payload)
+    conn = db()
+    try:
+        user = require_payroll_access(x_telegram_username, conn)
+        handler = user["username"]
+        if user["role"] == "admin" and payload.handler:
+            handler = payload.handler.lstrip("@").strip().lower()
+        now = datetime.utcnow().isoformat()
+        row_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO handler_deposits(id, handler, day, client, amount, kind, status, comment, created_at, created_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s)",
+            (row_id, handler, day, client, amount, payload.kind, (payload.comment or "").strip()[:500] or None, now, user["username"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": row_id}
+
+
+@app.post("/api/v1/payroll/deposits/{row_id}")
+def edit_handler_deposit(row_id: str, payload: HandlerDeposit, x_telegram_username: str = Depends(current_username)):
+    """Fix a deposit. Handlers can edit only their own pending rows; an edit sends a row back to review."""
+    day, client, amount = _clean_deposit(payload)
+    conn = db()
+    try:
+        user = require_payroll_access(x_telegram_username, conn)
+        row = conn.execute("SELECT * FROM handler_deposits WHERE id=%s", (row_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Запись не найдена")
+        if user["role"] != "admin" and (row["handler"].lower() != user["username"].lower() or row["status"] != "pending"):
+            raise HTTPException(status_code=403, detail="Менять можно только свои записи, пока их не проверил админ")
+        conn.execute(
+            "UPDATE handler_deposits SET day=%s, client=%s, amount=%s, kind=%s, comment=%s, status='pending', "
+            "reviewed_at=NULL, reviewed_by=NULL WHERE id=%s",
+            (day, client, amount, payload.kind, (payload.comment or "").strip()[:500] or None, row_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/payroll/deposits/{row_id}/review")
+def review_handler_deposit(row_id: str, payload: DepositReview, x_telegram_username: str = Depends(current_username)):
+    if payload.status not in DEPOSIT_STATUSES:
+        raise HTTPException(status_code=400, detail="Статус: pending, approved или rejected")
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        conn.execute("UPDATE handler_deposits SET status=%s, reviewed_at=%s, reviewed_by=%s WHERE id=%s",
+                     (payload.status, datetime.utcnow().isoformat(), admin, row_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/payroll/deposits/{row_id}")
+def delete_handler_deposit(row_id: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_payroll_access(x_telegram_username, conn)
+        row = conn.execute("SELECT handler, status FROM handler_deposits WHERE id=%s", (row_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Запись не найдена")
+        if user["role"] != "admin" and (row["handler"].lower() != user["username"].lower() or row["status"] != "pending"):
+            raise HTTPException(status_code=403, detail="Удалять можно только свои непроверенные записи")
+        conn.execute("DELETE FROM handler_deposits WHERE id=%s", (row_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/payroll/summary")
+def payroll_summary(month: str = "", x_telegram_username: str = Depends(current_username)):
+    month = month or _current_month()
+    start, end = _month_bounds(month)
+    conn = db()
+    try:
+        user = require_payroll_access(x_telegram_username, conn)
+        rules = payroll_rules(conn)
+        handlers = [r["username"] for r in conn.execute(
+            "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+        handlers += sorted({r["handler"] for r in conn.execute(
+            "SELECT DISTINCT handler FROM handler_deposits WHERE day>=%s AND day<=%s", (start.isoformat(), end.isoformat())).fetchall()}
+            - set(handlers))
+        deposits = [dict(r) for r in conn.execute(
+            "SELECT handler, day, amount, kind FROM handler_deposits WHERE status='approved' AND day>=%s AND day<=%s",
+            ((start - timedelta(days=6)).isoformat(), end.isoformat())).fetchall()]
+        extras = {r["handler"]: dict(r) for r in conn.execute(
+            "SELECT handler, video_reviews, dialogs_override FROM payroll_extras WHERE month=%s", (month,)).fetchall()}
+        dialogs = _handler_dialogs(conn, month, handlers)
+        pending = conn.execute("SELECT COUNT(*) AS c FROM handler_deposits WHERE status='pending' AND day>=%s AND day<=%s",
+                               (start.isoformat(), end.isoformat())).fetchone()["c"]
+    finally:
+        conn.close()
+    rows = compute_payroll(month, handlers, deposits, dialogs, extras, rules)
+    if user["role"] == "handler":
+        rows = [r for r in rows if r["handler"].lower() == user["username"].lower()]
+    return {"month": month, "rules": rules, "rows": rows, "pending": int(pending),
+            "total": round(sum(r["total"] for r in rows), 2), "can_edit": user["role"] == "admin"}
+
+
+@app.post("/api/v1/payroll/extras")
+def save_payroll_extras(payload: PayrollExtra, x_telegram_username: str = Depends(current_username)):
+    _month_bounds(payload.month)
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        handler = payload.handler.lstrip("@").strip().lower()
+        row = conn.execute("SELECT video_reviews, dialogs_override FROM payroll_extras WHERE handler=%s AND month=%s",
+                           (handler, payload.month)).fetchone()
+        video = payload.video_reviews if payload.video_reviews is not None else (row["video_reviews"] if row else 0)
+        override = None if payload.clear_override else (
+            payload.dialogs_override if payload.dialogs_override is not None else (row["dialogs_override"] if row else None))
+        conn.execute(
+            "INSERT INTO payroll_extras(handler, month, video_reviews, dialogs_override, updated_at, updated_by) VALUES(%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(handler, month) DO UPDATE SET video_reviews=excluded.video_reviews, dialogs_override=excluded.dialogs_override, "
+            "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+            (handler, payload.month, max(0, int(video or 0)), override, datetime.utcnow().isoformat(), admin),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/settings/payroll")
+def save_payroll_rules(payload: dict, x_telegram_username: str = Depends(current_username)):
+    rules = {**PAYROLL_DEFAULT_RULES}
+    try:
+        for k in PAYROLL_DEFAULT_RULES:
+            if k == "tiers" and k in payload:
+                rules[k] = [{"from": float(t["from"]), "rate": float(t["rate"])} for t in payload[k]]
+            elif k in payload:
+                rules[k] = float(payload[k])
+    except (TypeError, ValueError, KeyError):
+        raise HTTPException(status_code=400, detail="Проверь числа в правилах")
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        set_setting(conn, PAYROLL_RULES_KEY, json.dumps(rules), admin)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok", "rules": rules}
+
+
+# ---------------------------------------------------------------------------
+# Buyer reports: buyers log daily spend per campaign, CRM adds the funnel
+# ---------------------------------------------------------------------------
+
+BUYER_REPORT_ROLES = ("admin", "head_buying", "buyer")
+
+
+class BuyerReport(BaseModel):
+    day: str
+    campaign: str
+    spend: float
+    accounts: int | None = None
+    bans: int | None = None
+    comment: str | None = None
+
+
+def require_buyer_access(username, conn):
+    user = require_access(username, conn)
+    if user["role"] not in BUYER_REPORT_ROLES:
+        raise HTTPException(status_code=403, detail="Только баинг и админ")
+    return user
+
+
+def lead_funnel_days(x):
+    """Lead, registration and first-deposit days of a lead plus its deposit sum (same rules as the buying stats)."""
+    accs = x.get("matched_accounts") or []
+    rank = STAGE_ORDER.get(x["stage"], 0)
+    has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
+    lead_day = _stat_day(x.get("first_seen_at"))
+    reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or (lead_day if (rank >= 1 or accs) else None)
+    ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
+    deposit = sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
+    return lead_day, reg_day, ftd_day, deposit if ftd_day else 0.0
+
+
+@app.get("/api/v1/buying/reports")
+def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_buyer_access(x_telegram_username, conn)
+        reports = [dict(r) for r in conn.execute("SELECT * FROM buyer_reports ORDER BY day DESC, buyer, campaign").fetchall()]
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        ads = conn.execute("SELECT day, SUM(spend) AS spend FROM ad_spend GROUP BY day").fetchall()
+        since = data_since(conn)
+    finally:
+        conn.close()
+
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    start = (today - timedelta(days=days - 1)).isoformat() if days and days > 0 else ""
+    start = max(start, since or "")
+    mine_only = user["role"] == "buyer"
+    if mine_only:
+        reports = [r for r in reports if r["buyer"].lower() == user["username"].lower()]
+    period = [r for r in reports if r["day"] >= start]
+    ads_by_day = {r["day"]: float(r["spend"] or 0) for r in ads}
+
+    def bucket():
+        return {"spend": 0.0, "leads": 0, "reg": 0, "ftd": 0, "deposits": 0.0}
+
+    def finish(b):
+        sp = b["spend"]
+        return {**{k: round(v, 2) if isinstance(v, float) else v for k, v in b.items()},
+                "cpl": round(sp / b["leads"], 2) if b["leads"] else None,
+                "cp_ftd": round(sp / b["ftd"], 2) if b["ftd"] else None,
+                "roi": round((b["deposits"] - sp) / sp * 100, 1) if sp else None}
+
+    funnel = []  # (campaign key, lead day, reg day, ftd day, deposit)
+    for x in leads:
+        lead_day, reg_day, ftd_day, dep = lead_funnel_days(x)
+        funnel.append((_key(x.get("campaign") or "Без кампании"), lead_day, reg_day, ftd_day, dep))
+
+    def add_funnel(b, keys, day_ok):
+        for ck, lead_day, reg_day, ftd_day, dep in funnel:
+            if keys is not None and ck not in keys:
+                continue
+            b["leads"] += int(day_ok(lead_day))
+            b["reg"] += int(day_ok(reg_day))
+            if day_ok(ftd_day):
+                b["ftd"] += 1
+                b["deposits"] += dep
+
+    by_buyer = {}
+    for r in period:
+        b = by_buyer.setdefault(r["buyer"], {**bucket(), "campaigns": set(), "accounts": 0, "bans": 0})
+        b["spend"] += float(r["spend"] or 0)
+        b["campaigns"].add(_key(r["campaign"]))
+        b["accounts"] += int(r["accounts"] or 0)
+        b["bans"] += int(r["bans"] or 0)
+    in_period = lambda d: bool(d) and d >= start
+    buyers = []
+    for name, b in by_buyer.items():
+        keys = b.pop("campaigns")
+        add_funnel(b, keys, in_period)
+        buyers.append({"buyer": name, "campaigns": len(keys), **finish(b)})
+    buyers.sort(key=lambda b: -b["spend"])
+
+    span = min(days, 31) if days and days > 0 else 14
+    day_list = [d for d in ((today - timedelta(days=i)).isoformat() for i in range(span)) if d >= start]
+    own_keys = {_key(r["campaign"]) for r in reports} if mine_only else None
+    daily = []
+    for d in day_list:
+        b = bucket()
+        b["spend"] = sum(float(r["spend"] or 0) for r in period if r["day"] == d)
+        add_funnel(b, own_keys, lambda v, d=d: v == d)
+        daily.append({"date": d, "ads_spend": None if mine_only else round(ads_by_day.get(d, 0.0), 2), **finish(b)})
+    total = bucket()
+    total["spend"] = sum(float(r["spend"] or 0) for r in period)
+    add_funnel(total, own_keys, in_period)
+    known = sorted({x.get("campaign") for x in leads if x.get("campaign")} | {r["campaign"] for r in reports})
+    return {"days": days, "since": start, "viewer": {"username": user["username"], "role": user["role"]},
+            "rows": period[:300], "by_buyer": buyers, "daily": daily, "total": finish(total), "campaigns": known}
+
+
+@app.post("/api/v1/buying/reports")
+def save_buyer_report(payload: BuyerReport, x_telegram_username: str = Depends(current_username)):
+    day = _parse_day(payload.day)
+    campaign = payload.campaign.strip()
+    if not day or not campaign:
+        raise HTTPException(status_code=400, detail="Нужны дата и кампания")
+    if payload.spend is None or payload.spend < 0:
+        raise HTTPException(status_code=400, detail="Расход не может быть отрицательным")
+    conn = db()
+    try:
+        user = require_buyer_access(x_telegram_username, conn)
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            "INSERT INTO buyer_reports(id, buyer, day, campaign, spend, accounts, bans, comment, created_at, updated_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(buyer, day, campaign) DO UPDATE SET spend=excluded.spend, "
+            "accounts=excluded.accounts, bans=excluded.bans, comment=excluded.comment, updated_at=excluded.updated_at",
+            (uuid.uuid4().hex, user["username"], day.isoformat(), campaign[:200], round(float(payload.spend), 2),
+             payload.accounts, payload.bans, (payload.comment or "").strip()[:500] or None, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/buying/reports/{row_id}")
+def delete_buyer_report(row_id: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_buyer_access(x_telegram_username, conn)
+        row = conn.execute("SELECT buyer FROM buyer_reports WHERE id=%s", (row_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Запись не найдена")
+        if user["role"] == "buyer" and row["buyer"].lower() != user["username"].lower():
+            raise HTTPException(status_code=403, detail="Можно удалять только свои отчёты")
+        conn.execute("DELETE FROM buyer_reports WHERE id=%s", (row_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
