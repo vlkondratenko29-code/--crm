@@ -3780,8 +3780,19 @@ def compute_payroll(month, handlers, deposits, dialogs, extras, rules):
     return out
 
 
+_dialogs_cache = {}  # month -> (computed_at, {handler: dialogs})
+DIALOGS_CACHE_SECONDS = 600
+
+
 def _handler_dialogs(conn, month, handlers):
-    """Dialogs per handler in the month: leads assigned to them in Chatterfy that wrote that month."""
+    """Dialogs per handler in the month: leads assigned to them in Chatterfy that wrote that month.
+
+    Reads only leads, DIALOG events and assignments (no broker matching like build_leads), and keeps
+    the result for 10 minutes: on the free Render instance the full lead build takes tens of seconds.
+    """
+    cached = _dialogs_cache.get(month)
+    if cached and (datetime.utcnow() - cached[0]).total_seconds() < DIALOGS_CACHE_SECONDS:
+        return {h: cached[1].get(h, 0) for h in handlers}
     start, end = _month_bounds(month)
     s, e = start.isoformat(), end.isoformat()
     alias = {}
@@ -3789,13 +3800,27 @@ def _handler_dialogs(conn, month, handlers):
         alias[r["username"].lower()] = r["username"]
         if r["chatterfy_email"]:
             alias[r["chatterfy_email"].lower()] = r["username"]
-    counts = {h: 0 for h in handlers}
-    for x in build_leads(conn, {"role": "admin", "username": "system"}):
-        h = alias.get((x.get("assignee") or "").lower())
-        day = _stat_day(x.get("dialog_at") or x.get("first_seen_at"))
-        if h in counts and day and s <= day <= e:
-            counts[h] += 1
-    return counts
+    dialog_at = {}
+    for ev in conn.execute("SELECT email, event_date, created_at FROM crm_events WHERE source='chatterfy' AND upper(event_type)='DIALOG'").fetchall():
+        k = (ev["email"] or "").strip().lower()
+        when = str(ev["event_date"] or ev["created_at"] or "")
+        if k and when and (k not in dialog_at or when < dialog_at[k]):
+            dialog_at[k] = when
+    assignee = {r["lead_key"]: r["assignee"] for r in conn.execute("SELECT lead_key, assignee FROM lead_work").fetchall()}
+    days = {}  # lead_key -> day the client wrote (earliest over its chats)
+    for r in conn.execute("SELECT chat_id, email, first_seen_at, attribution_json FROM chatterfy_leads").fetchall():
+        key = lead_key_for(r["email"], r["chat_id"])
+        when = dialog_at.get(key) or dialog_at.get(f"chat:{r['chat_id']}") or r["first_seen_at"] or _load_attr(r["attribution_json"]).get("created_at")
+        day = _stat_day(when)
+        if day and (key not in days or day < days[key]):
+            days[key] = day
+    counts = {}
+    for key, day in days.items():
+        h = alias.get((assignee.get(key) or "").lower())
+        if h and s <= day <= e:
+            counts[h] = counts.get(h, 0) + 1
+    _dialogs_cache[month] = (datetime.utcnow(), counts)
+    return {h: counts.get(h, 0) for h in handlers}
 
 
 PAYROLL_VIEW_ROLES = ("seo",)  # see every handler's deposits, salary and shifts, change nothing

@@ -35,7 +35,7 @@ export async function api(path, { username, method = "GET", body, headers = {}, 
     }
     return data;
   } catch (error) {
-    if (error.name === "AbortError") throw new Error("CRM did not respond in 30 seconds. Check that Render and Supabase are up.");
+    if (error.name === "AbortError") throw new Error(`CRM did not respond in ${Math.round(timeout / 1000)} seconds. Check that Render and Supabase are up.`);
     throw error;
   } finally {
     clearTimeout(timer);

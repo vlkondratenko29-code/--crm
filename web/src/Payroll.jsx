@@ -90,21 +90,25 @@ export default function Payroll({ username }) {
   const [editing, setEditing] = useState(null);
   const [msg, setMsg] = useState("");
   const [error, setError] = useState("");
+  const [sumError, setSumError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showRules, setShowRules] = useState(false);
 
+  // Deposits come back at once; the salary needs the month's dialogs and can take longer, so it loads on its own.
   const load = useCallback(async () => {
-    try {
-      const [d, s] = await Promise.all([
-        api(`/api/v1/payroll/deposits?month=${month}&handler=${encodeURIComponent(filter)}`, { username }),
-        api(`/api/v1/payroll/summary?month=${month}`, { username }),
-      ]);
-      setDeps(d); setSum(s); setError("");
-    } catch (e) { setError(e.message); }
+    const deposits = api(`/api/v1/payroll/deposits?month=${month}&handler=${encodeURIComponent(filter)}`, { username })
+      .then(d => { setDeps(d); setError(""); })
+      .catch(e => setError(e.message));
+    const salary = api(`/api/v1/payroll/summary?month=${month}`, { username, timeout: 90000 })
+      .then(s => { setSum(s); setSumError(""); })
+      .catch(e => setSumError(e.message));
+    await Promise.all([deposits, salary]);
   }, [month, filter, username]);
   useEffect(() => { load(); }, [load]);
 
   const admin = !!deps?.can_review;
+  const ro = !!deps?.read_only;  // SEO: sees the whole team, changes nothing
+  const team = admin || ro;
   const set = k => e => setForm({ ...form, [k]: e.target.value });
 
   async function submit() {
@@ -161,6 +165,8 @@ export default function Payroll({ username }) {
       </div>
       {error && <div className="team-message">{error}</div>}
 
+      {!sum && (sumError ? <div className="team-message">ЗП не посчиталась: {sumError} <button className="link-btn" onClick={load}>Повторить</button></div>
+        : <p className="subtitle">Считаю ЗП… первый раз за 10 минут может занять до минуты.</p>)}
       {sum && <div className="st-kpis">
         {mine ? <>
           <div><span>К выплате</span><b className="t-money">{money(mine.total)}</b><small>пока месяц идёт — предварительно</small></div>
@@ -232,7 +238,7 @@ export default function Payroll({ username }) {
           {showRules && <Rules rules={sum.rules} onSave={saveRules} />}
         </>}
       </div>}
-      {!deps && !error && <p className="subtitle">Загружаю…</p>}
+      {!deps && !error && <p className="subtitle">Загружаю депозиты…</p>}
     </section>
   );
 }
