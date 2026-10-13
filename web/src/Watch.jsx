@@ -33,7 +33,7 @@ export default function Watch({ username }) {
     setBusy(true); setMsg("");
     try {
       const r = await api("/api/v1/watch/run", { username, method: "POST", timeout: 90000 });
-      setMsg(r.status === "no_key" ? "Нет ключа Chatterfy — добавь его в настройках ниже." : r.error ? "Ошибка: " + r.error : `Проверено чатов: ${r.chats ?? 0}, новых нарушений: ${r.found ?? 0}, размечено из канала: ${r.tagged ?? 0}`);
+      setMsg(r.status === "no_key" ? "Нет ключа Chatterfy — добавь его в настройках ниже." : r.error ? "Ошибка: " + r.error : `Проверено чатов: ${r.chats ?? 0}, новых нарушений: ${r.found ?? 0}, размечено из канала: ${r.tagged ?? 0}, подтянуто почт клиентов: ${r.contacts ?? 0}`);
       await load();
     } catch (e) { setMsg(e.message); } finally { setBusy(false); }
   }

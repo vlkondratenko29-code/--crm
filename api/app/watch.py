@@ -82,6 +82,54 @@ def check_text(text, allowed=DEFAULT_ALLOWED):
     return out
 
 
+EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![\w-])")
+UID_RE = re.compile(r"^\s*#?\d{5,12}\s*$")
+# Parts of a chat object that describe our side (operators, the bot, the space), never the client.
+_STAFF_KEYS = {"manager", "managers", "operator", "operators", "user", "users", "assignee", "sender", "owner",
+               "creator", "author", "bot", "space", "last_message", "messages", "account"}
+
+
+def emails_in(text):
+    return [m.group(0).lower() for m in EMAIL_RE.finditer(text or "")]
+
+
+def client_contact(chat):
+    """(email, uid) the operator filled in the chat's custom fields ("UID / email клиента"), if any.
+
+    The chat JSON layout is not documented, so look for any field whose key or name mentions
+    email / uid and skip the parts that describe staff.
+    """
+    email, uid = None, None
+
+    def visit(node, label=""):
+        nonlocal email, uid
+        if isinstance(node, dict):
+            name = " ".join(str(node.get(k) or "") for k in ("name", "title", "key", "label", "slug")).lower()
+            value = node.get("value")
+            if isinstance(value, (str, int)) and ("email" in name or "uid" in name or "почт" in name):
+                found = emails_in(str(value))
+                if found and not email:
+                    email = found[0]
+                elif UID_RE.match(str(value)) and not uid:
+                    uid = re.sub(r"\D", "", str(value))
+            for k, v in node.items():
+                if str(k).lower() in _STAFF_KEYS:
+                    continue
+                visit(v, str(k).lower())
+        elif isinstance(node, list):
+            for v in node:
+                visit(v, label)
+        elif isinstance(node, str) and ("email" in label or "uid" in label or "почт" in label):
+            found = emails_in(node)
+            if found and not email:
+                email = found[0]
+            elif UID_RE.match(node) and not uid:
+                uid = re.sub(r"\D", "", node)
+
+    visit(chat)
+    return email, uid
+
+
 def code_word(text, words=DEFAULT_CODE_WORDS):
     """The channel code word a client's message contains, or None."""
     if not text:

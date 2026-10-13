@@ -3550,6 +3550,73 @@ def _tag_channel_source(conn, chat, items, codes):
     return True
 
 
+def _attach_contact(conn, chat, email=None, uid=None):
+    """Save the client's email / broker UID found in Chatterfy on a lead that has none yet.
+
+    A lead without email is keyed "chat:<id>"; once it gets an email its key becomes the email,
+    so the handler assignment and notes move to the new key too.
+    """
+    ids = [x for x in (str(chat.get("id") or ""), str(chat.get("external_id") or "")) if x]
+    if not ids or not (email or uid):
+        return False
+    rows = conn.execute("SELECT chat_id, email, uid FROM chatterfy_leads WHERE chat_id IN (%s)" % ",".join(["%s"] * len(ids)),
+                        tuple(ids)).fetchall()
+    changed = False
+    for row in rows:
+        if uid and not row["uid"]:
+            conn.execute("UPDATE chatterfy_leads SET uid=%s WHERE chat_id=%s", (uid, row["chat_id"]))
+            changed = True
+        email = broker_lib.normalize_email(email)
+        if not email or row["email"]:
+            continue
+        conn.execute("UPDATE chatterfy_leads SET email=%s, updated_at=%s WHERE chat_id=%s",
+                     (email, datetime.utcnow().isoformat(), row["chat_id"]))
+        old_key = f"chat:{row['chat_id']}"
+        if not conn.execute("SELECT 1 FROM lead_work WHERE lead_key=%s", (email,)).fetchone():
+            conn.execute("UPDATE lead_work SET lead_key=%s WHERE lead_key=%s", (email, old_key))
+        conn.execute("UPDATE lead_notes SET lead_key=%s WHERE lead_key=%s", (email, old_key))
+        changed = True
+    return changed
+
+
+def _sync_contacts(conn, client, chats, messages_by_chat):
+    """Fill missing client emails from the chat's custom fields and from what the client wrote."""
+    missing = {r["chat_id"] for r in conn.execute("SELECT chat_id FROM chatterfy_leads WHERE email IS NULL OR email=''").fetchall()}
+    if not missing:
+        return 0
+    filled = 0
+    backfill = get_setting(conn, CONTACT_BACKFILL, "") != "done"
+    backfill_budget = 150  # message reads allowed on that first run
+    for chat in chats:
+        ids = {str(chat.get("id") or ""), str(chat.get("external_id") or "")}
+        if not ids & missing:
+            continue
+        email, uid = watch_lib.client_contact(chat)
+        if not email:
+            items = messages_by_chat.get(chat["id"])
+            # First run after this feature: also read recent chats that had no new messages.
+            recent = ((chat.get("last_message") or {}).get("created_at") or "") >= (datetime.utcnow() - timedelta(days=14)).isoformat()
+            if items is None and backfill and recent and backfill_budget > 0:
+                backfill_budget -= 1
+                try:
+                    items = client.messages(chat["id"], 50)
+                except watch_lib.ChatterfyError:
+                    items = []
+            for m in items or []:
+                if m.get("sender_type") == "incoming":
+                    found = watch_lib.emails_in(m.get("content"))
+                    if found:
+                        email = found[-1]
+        if _attach_contact(conn, chat, email, uid):
+            filled += 1
+    if backfill:
+        set_setting(conn, CONTACT_BACKFILL, "done", "watch")
+    return filled
+
+
+CONTACT_BACKFILL = "contact_backfill"
+
+
 def run_watch(conn, max_chats=300):
     key = watch_key(conn)
     if not key:
@@ -3569,9 +3636,11 @@ def run_watch(conn, max_chats=300):
     active = [c for c in chats if ((c.get("last_message") or {}).get("created_at") or "") > cursor]
     names = _sender_names(conn, client) if active else {}
     newest, found, tagged = cursor, [], 0
+    messages_by_chat = {}
     for chat in active:
         newest = max(newest, (chat.get("last_message") or {}).get("created_at") or "")
         items = client.messages(chat["id"], 50)
+        messages_by_chat[chat["id"]] = items
         for m in items:
             at = m.get("created_at") or ""
             if at <= cursor:
@@ -3597,8 +3666,14 @@ def run_watch(conn, max_chats=300):
                     tagged += 1
             except Exception as exc:
                 print(f"watch: channel tag failed: {exc}")
+    try:
+        contacts = _sync_contacts(conn, client, chats, messages_by_chat)
+    except Exception as exc:
+        contacts = 0
+        print(f"watch: contact sync failed: {exc}")
     set_setting(conn, WATCH_CURSOR, newest, "watch")
-    status = {"at": now.isoformat(), "chats": len(active), "found": len(found), "tagged": tagged, "error": None}
+    status = {"at": now.isoformat(), "chats": len(active), "found": len(found), "tagged": tagged,
+              "contacts": contacts, "error": None}
     set_setting(conn, WATCH_STATUS, json.dumps(status), "watch")
     conn.commit()
     if found:
