@@ -3755,6 +3755,7 @@ def watch_overview(x_telegram_username: str = Depends(current_username)):
         return {
             "configured": bool(watch_key(conn)),
             "key_from_env": bool(os.getenv("CHATTERFY_API_KEY")),
+            "key_problem": watch_lib.key_problem(watch_key(conn)) if watch_key(conn) else None,
             "status": status,
             "allowed": "\n".join(_list_setting(conn, WATCH_ALLOWED, watch_lib.DEFAULT_ALLOWED)),
             "codes": ", ".join(_list_setting(conn, WATCH_CODES, watch_lib.DEFAULT_CODE_WORDS)),
@@ -3771,7 +3772,10 @@ def save_watch_settings(payload: WatchSettings, x_telegram_username: str = Depen
     try:
         admin = require_admin(x_telegram_username, conn)
         if payload.api_key is not None and payload.api_key.strip():
-            set_setting(conn, WATCH_KEY_SETTING, payload.api_key.strip(), admin)
+            problem = watch_lib.key_problem(payload.api_key)
+            if problem:
+                raise HTTPException(status_code=400, detail=problem)
+            set_setting(conn, WATCH_KEY_SETTING, watch_lib.clean_key(payload.api_key), admin)
         if payload.allowed is not None:
             set_setting(conn, WATCH_ALLOWED, payload.allowed.strip(), admin)
         if payload.codes is not None:

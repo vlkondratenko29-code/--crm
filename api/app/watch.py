@@ -148,10 +148,26 @@ class ChatterfyError(Exception):
     pass
 
 
+def clean_key(key):
+    """Service-account token as pasted from a phone: drop "Bearer", quotes, spaces and line breaks."""
+    key = re.sub(r"^\s*bearer\s+", "", str(key or ""), flags=re.I)
+    return re.sub(r"[\s\"'`]+", "", key)
+
+
+def key_problem(key):
+    """Why a pasted value cannot be a Chatterfy token (it is a JWT: three dot-separated parts), or None."""
+    key = clean_key(key)
+    if not key:
+        return "Ключ пустой"
+    if key.count(".") != 2:
+        return ("Это не похоже на ключ Chatterfy: ключ — длинная строка из трёх частей через точку, обычно "
+                "начинается с eyJ. Скопируй его целиком сразу после выпуска в Chatterfy (Компания → Service accounts).")
+    return None
+
+
 class Chatterfy:
     def __init__(self, key, base=CHATTERFY_API, timeout=20):
-        key = (key or "").strip()
-        self.auth = key if key.lower().startswith("bearer ") else "Bearer " + key
+        self.auth = "Bearer " + clean_key(key)
         self.base = base.rstrip("/")
         self.timeout = timeout
 

@@ -47,10 +47,11 @@ export default function Watch({ username }) {
       {error && <div className="team-message">{error}</div>}
       {data && <>
         <div className="st-kpis">
-          <div><span>Статус</span><b className={data.configured && !st.error ? "t-ftd" : "t-bad"}>{!data.configured ? "Нет ключа" : st.error ? "Ошибка" : "Работает"}</b><small>{st.at ? "проверка " + when(st.at) : "ещё не запускался"}</small></div>
+          <div><span>Статус</span><b className={data.configured && !st.error && !data.key_problem ? "t-ftd" : "t-bad"}>{!data.configured ? "Нет ключа" : data.key_problem ? "Неверный ключ" : st.error ? "Ошибка" : "Работает"}</b><small>{st.at ? "проверка " + when(st.at) : "ещё не запускался"}</small></div>
           <div><span>Нарушений</span><b className={data.alerts.length ? "t-bad" : ""}>{data.alerts.length}</b><small>последние 100</small></div>
         </div>
         {st.error && <p className="recon-hint warn">{st.error}</p>}
+        {data.key_problem && <p className="recon-hint warn">Сохранённый ключ неверный: {data.key_problem}{data.key_from_env ? " Ключ задан в Render (переменная CHATTERFY_API_KEY) — исправь его там." : " Вставь новый в «Настройках» ниже."}</p>}
         <div className="buy-upload">
           <div><b>Проверить сейчас</b><small>Не ждать следующих 3 минут</small></div>
           <button className="upload-btn" disabled={busy} onClick={runNow}>{busy ? "Проверяю…" : "Проверить"}</button>
