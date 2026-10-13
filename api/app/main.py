@@ -2391,8 +2391,11 @@ def build_leads(conn, viewer, accounts=None):
         ftd_amount = None
         last_event_at = None
         event_at = {}
+        dated_events = []  # REG/FTD/FT with a real date (not the day a tag export was imported)
         for ev in evs:
             t = str(ev["event_type"] or "").upper()
+            if ev["event_date"] and t in STAGE_ORDER:
+                dated_events.append(str(ev["event_date"]))
             when = ev["event_date"] or ev["created_at"]
             if when and (t not in event_at or str(when) < event_at[t]):
                 event_at[t] = str(when)
@@ -2433,10 +2436,16 @@ def build_leads(conn, viewer, accounts=None):
             "ftd_at": event_at.get("FTD"),
             "notes": note_counts.get(key, 0),
             "last_activity": activity or None,
+            "_progress_dates": dated_events + [d for a in matched for d in (a.get("registration_date"), a.get("ftd_date")) if d],
         })
     since = data_since(conn)
     if since:
-        result = [x for x in result if after_since(x["first_seen_at"], since)]
+        # A lead older than the cut-off still counts once it registers or deposits after it
+        # (wrote on the 5th, registered on the 13th). Only real event dates count here.
+        result = [x for x in result
+                  if after_since(x["first_seen_at"], since) or any(after_since(d, since) for d in x["_progress_dates"])]
+    for x in result:
+        x.pop("_progress_dates")
     result.sort(key=lambda x: x["last_activity"] or "", reverse=True)
     return result
 
