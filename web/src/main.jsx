@@ -7,6 +7,7 @@ import Stats from "./Stats.jsx";
 import Watch from "./Watch.jsx";
 import Payroll from "./Payroll.jsx";
 import BuyerReports from "./BuyerReports.jsx";
+import Shifts from "./Shifts.jsx";
 import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
@@ -56,11 +57,11 @@ function App() {
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   // `main` tabs sit in the bottom bar; the rest open from «Ещё».
   const roleMeta = {
-    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["payroll", "reports", "watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
+    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["payroll", "shifts", "reports", "watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
     head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "reports"], more: ["traffic", "clients", "reconcile", "finance"] },
     buyer: { label: "БАЕР", title: "Отчёты по расходу", main: ["reports"], more: [] },
-    seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: [] },
-    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "payroll", "clients"], more: [] },
+    seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: ["payroll", "shifts"] },
+    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "payroll", "shifts", "clients"], more: [] },
   }[effectiveUser.role] || { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] };
   roleMeta.tabs = [...roleMeta.main, ...roleMeta.more];
   const canSee = (id) => roleMeta.tabs.includes(id);
@@ -352,6 +353,7 @@ function App() {
       {tab === "watch" && canSee("watch") && <Watch username={effectiveUser.username} />}
       {tab === "payroll" && canSee("payroll") && <Payroll username={effectiveUser.username} />}
       {tab === "reports" && canSee("reports") && <BuyerReports username={effectiveUser.username} />}
+      {tab === "shifts" && canSee("shifts") && <Shifts username={effectiveUser.username} />}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">КОМАНДА</p>
         <h2>Доступ команды</h2>
@@ -499,12 +501,12 @@ function App() {
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
   finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",
-  payroll: "Депы и ЗП", reports: "Отчёты",
+  payroll: "Депы и ЗП", reports: "Отчёты", shifts: "Смены",
 };
 const TAB_ICONS = {
   dashboard: "◉", leads: "☷", reconcile: "⚖", clients: "⌕", stats: "◈",
   finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥", watch: "🛡",
-  payroll: "💵", reports: "▤",
+  payroll: "💵", reports: "▤", shifts: "🗓",
 };
 const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", buyer: "Баер", seo: "SEO", handler: "Обработчик" };
 const STATUS_LABELS = { "Chatterfy lead": "Лид Chatterfy", "FxPro account": "Счёт FxPro" };

@@ -357,6 +357,20 @@ def init_db():
                 UNIQUE (buyer, day, campaign)
             )
         """)
+        # Handler work schedule: shifts in Turkey time; end <= start means the shift runs past midnight.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS handler_shifts (
+                id TEXT PRIMARY KEY,
+                handler TEXT NOT NULL,
+                day TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                note TEXT,
+                updated_at TEXT,
+                updated_by TEXT,
+                UNIQUE (handler, day, start_time)
+            )
+        """)
         for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -3784,9 +3798,12 @@ def _handler_dialogs(conn, month, handlers):
     return counts
 
 
-def require_payroll_access(username, conn):
+PAYROLL_VIEW_ROLES = ("seo",)  # see every handler's deposits, salary and shifts, change nothing
+
+
+def require_payroll_access(username, conn, read=False):
     user = require_access(username, conn)
-    if user["role"] not in ("admin", "handler"):
+    if user["role"] not in ("admin", "handler") and not (read and user["role"] in PAYROLL_VIEW_ROLES):
         raise HTTPException(status_code=403, detail="Только обработчики и админ")
     return user
 
@@ -3830,7 +3847,7 @@ def list_handler_deposits(month: str = "", handler: str = "", x_telegram_usernam
     start, end = _month_bounds(month)
     conn = db()
     try:
-        user = require_payroll_access(x_telegram_username, conn)
+        user = require_payroll_access(x_telegram_username, conn, read=True)
         sql, params = "SELECT * FROM handler_deposits WHERE day>=%s AND day<=%s", [start.isoformat(), end.isoformat()]
         if user["role"] == "handler":
             sql += " AND lower(handler)=%s"
@@ -3844,6 +3861,7 @@ def list_handler_deposits(month: str = "", handler: str = "", x_telegram_usernam
     finally:
         conn.close()
     return {"month": month, "rows": rows, "handlers": handlers, "can_review": user["role"] == "admin",
+            "read_only": user["role"] in PAYROLL_VIEW_ROLES,
             "pending": sum(1 for r in rows if r["status"] == "pending")}
 
 
@@ -3930,7 +3948,7 @@ def payroll_summary(month: str = "", x_telegram_username: str = Depends(current_
     start, end = _month_bounds(month)
     conn = db()
     try:
-        user = require_payroll_access(x_telegram_username, conn)
+        user = require_payroll_access(x_telegram_username, conn, read=True)
         rules = payroll_rules(conn)
         handlers = [r["username"] for r in conn.execute(
             "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
@@ -4148,6 +4166,108 @@ def delete_buyer_report(row_id: str, x_telegram_username: str = Depends(current_
         if user["role"] == "buyer" and row["buyer"].lower() != user["username"].lower():
             raise HTTPException(status_code=403, detail="Можно удалять только свои отчёты")
         conn.execute("DELETE FROM buyer_reports WHERE id=%s", (row_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Shifts: handlers mark their working hours for the week, admin sees coverage
+# ---------------------------------------------------------------------------
+
+SHIFT_ROLES = ("admin", "handler")
+# The team works two shifts; hours outside them are not expected to be covered.
+SHIFT_PRESETS = [
+    {"label": "Дневная", "start": "08:00", "end": "16:00"},
+    {"label": "Ночная", "start": "19:00", "end": "03:00"},
+]
+
+
+class Shift(BaseModel):
+    day: str
+    start: str
+    end: str
+    note: str | None = None
+    handler: str | None = None  # admin can set a shift for a handler
+
+
+def _hhmm(value):
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
+    if not m or int(m.group(1)) > 24 or int(m.group(2)) > 59 or (int(m.group(1)) == 24 and int(m.group(2))):
+        raise HTTPException(status_code=400, detail="Время в формате ЧЧ:ММ")
+    return "00:00" if int(m.group(1)) == 24 else f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def require_shift_access(username, conn, read=False):
+    user = require_access(username, conn)
+    if user["role"] not in SHIFT_ROLES and not (read and user["role"] in PAYROLL_VIEW_ROLES):
+        raise HTTPException(status_code=403, detail="Только обработчики и админ")
+    return user
+
+
+@app.get("/api/v1/shifts")
+def list_shifts(week: str = "", x_telegram_username: str = Depends(current_username)):
+    """One week (Monday to Sunday) of shifts for the whole team: handlers coordinate with each other."""
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    start = _parse_day(week) if week else today
+    if not start:
+        raise HTTPException(status_code=400, detail="Неделя в формате ГГГГ-ММ-ДД")
+    start = start - timedelta(days=start.weekday())
+    days = [(start + timedelta(days=i)).isoformat() for i in range(7)]
+    conn = db()
+    try:
+        user = require_shift_access(x_telegram_username, conn, read=True)
+        rows = [dict(r) for r in conn.execute(
+            "SELECT id, handler, day, start_time AS start, end_time AS \"end\", note FROM handler_shifts "
+            "WHERE day>=%s AND day<=%s ORDER BY day, start_time, handler", (days[0], days[-1])).fetchall()]
+        handlers = [r["username"] for r in conn.execute(
+            "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+    finally:
+        conn.close()
+    return {"week": days[0], "days": days, "today": today.isoformat(), "rows": rows, "handlers": handlers,
+            "presets": SHIFT_PRESETS, "me": user["username"], "can_edit_all": user["role"] == "admin",
+            "read_only": user["role"] in PAYROLL_VIEW_ROLES}
+
+
+@app.post("/api/v1/shifts")
+def save_shift(payload: Shift, x_telegram_username: str = Depends(current_username)):
+    day = _parse_day(payload.day)
+    if not day:
+        raise HTTPException(status_code=400, detail="Дата в формате ГГГГ-ММ-ДД")
+    start, end = _hhmm(payload.start), _hhmm(payload.end)
+    if start == end:
+        raise HTTPException(status_code=400, detail="Начало и конец смены совпадают")
+    conn = db()
+    try:
+        user = require_shift_access(x_telegram_username, conn)
+        handler = user["username"]
+        if user["role"] == "admin" and payload.handler:
+            handler = payload.handler.lstrip("@").strip().lower()
+        conn.execute(
+            "INSERT INTO handler_shifts(id, handler, day, start_time, end_time, note, updated_at, updated_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(handler, day, start_time) DO UPDATE SET "
+            "end_time=excluded.end_time, note=excluded.note, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+            (uuid.uuid4().hex, handler, day.isoformat(), start, end, (payload.note or "").strip()[:200] or None,
+             datetime.utcnow().isoformat(), user["username"]),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.delete("/api/v1/shifts/{row_id}")
+def delete_shift(row_id: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_shift_access(x_telegram_username, conn)
+        row = conn.execute("SELECT handler FROM handler_shifts WHERE id=%s", (row_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Смена не найдена")
+        if user["role"] != "admin" and row["handler"].lower() != user["username"].lower():
+            raise HTTPException(status_code=403, detail="Можно убирать только свои смены")
+        conn.execute("DELETE FROM handler_shifts WHERE id=%s", (row_id,))
         conn.commit()
     finally:
         conn.close()

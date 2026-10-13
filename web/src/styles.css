@@ -419,3 +419,16 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .month-switch button:disabled{opacity:.35}
 .filter-switch{margin-top:12px}
 @media(max-width:420px){.pay-extra{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.pay-extra .upload-btn{grid-column:1/-1}}
+/* --- shifts --- */
+.shift-day.today{border-color:#3d5a85}
+.shift-cover{display:grid;grid-template-columns:repeat(24,1fr);gap:2px;margin:4px 0 8px}
+.shift-cover i{height:8px;border-radius:2px}
+.shift-cover .c0{background:#5a2a24}.shift-cover .c1{background:#6b5a22}.shift-cover .c2{background:#2f6b4f}
+.shift-list{display:flex;flex-wrap:wrap;gap:6px}
+.shift-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:999px;background:#121a25;border:1px solid #293748;color:#c9d2df;font-size:12px;font-weight:600}
+.shift-chip.mine{border-color:#8fb4ff;color:#dce6f4}
+.shift-chip button{background:none;border:none;color:#ff9f8a;font-size:14px;line-height:1;padding:0;cursor:pointer}
+.shift-add{margin-top:10px;padding-top:10px;border-top:1px solid #222d3b}
+.shift-for{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:#9eacbf}
+.shift-for select{background:#121b26;border:1px solid #2a3647;border-radius:9px;color:#e7edf5;padding:7px 9px;font-size:13px}
+.shift-cover .off{background:#1a222d}

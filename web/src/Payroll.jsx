@@ -147,12 +147,12 @@ export default function Payroll({ username }) {
     } catch (e) { setMsg(e.message); }
   }
 
-  const mine = sum?.rows?.length === 1 && !admin ? sum.rows[0] : null;
+  const mine = sum?.rows?.length === 1 && !team ? sum.rows[0] : null;
   return (
     <section className="role-dashboard stats-screen">
       <div className="role-hero"><div><p className="eyebrow">ДЕПОЗИТЫ И ЗП</p>
-        <h2>{admin ? "Депозиты обработчиков" : "Мои депозиты"}</h2>
-        <p>{admin ? "Обработчики вносят депы, ты подтверждаешь. ЗП считается только по подтверждённым." : "Вноси каждый деп сразу. В ЗП он попадёт после подтверждения админом."}</p></div><span>💵</span></div>
+        <h2>{team ? "Депозиты обработчиков" : "Мои депозиты"}</h2>
+        <p>{ro ? "Только просмотр: депы обработчиков и их ЗП. ЗП считается по депам, которые подтвердил админ." : admin ? "Обработчики вносят депы, ты подтверждаешь. ЗП считается только по подтверждённым." : "Вноси каждый деп сразу. В ЗП он попадёт после подтверждения админом."}</p></div><span>💵</span></div>
 
       <div className="period-switch month-switch">
         <button onClick={() => setMonth(shiftMonth(month, -1))}>←</button>
@@ -175,11 +175,11 @@ export default function Payroll({ username }) {
 
       <div className="st-tabs">
         <button className={view === "deposits" ? "selected" : ""} onClick={() => setView("deposits")}>Депозиты</button>
-        <button className={view === "salary" ? "selected" : ""} onClick={() => setView("salary")}>{admin ? "Зарплаты" : "Моя ЗП"}</button>
+        <button className={view === "salary" ? "selected" : ""} onClick={() => setView("salary")}>{team ? "Зарплаты" : "Моя ЗП"}</button>
       </div>
 
       {view === "deposits" && <>
-        <div className="watch-settings">
+        {!ro && <div className="watch-settings">
           <b>{editing ? "Исправить депозит" : "Новый депозит"}</b>
           {admin && <label>Обработчик
             <select value={form.handler} onChange={set("handler")}><option value="">я сам</option>{(deps?.handlers || []).map(h => <option key={h} value={h}>{who(h)}</option>)}</select></label>}
@@ -194,21 +194,21 @@ export default function Payroll({ username }) {
             <button className="upload-btn" disabled={busy || !form.client || !form.amount} onClick={submit}>{busy ? "Сохраняю…" : editing ? "Сохранить" : "Добавить"}</button>
             {editing && <button className="link-btn" onClick={() => { setEditing(null); setForm(blank()); }}>Отмена</button>}
           </div>
-        </div>
+        </div>}
         {msg && <div className="team-message">{msg}</div>}
 
-        {admin && <div className="period-switch filter-switch">
+        {team && <div className="period-switch filter-switch">
           <button className={!filter ? "selected" : ""} onClick={() => setFilter("")}>Все</button>
           {(deps?.handlers || []).map(h => <button key={h} className={filter === h ? "selected" : ""} onClick={() => setFilter(h)}>{who(h)}</button>)}
         </div>}
         <div className="st-feed">
           {(deps?.rows || []).map(r => {
             const [label, tone] = STATUS[r.status] || [r.status, ""];
-            const own = r.status === "pending" || admin;
+            const own = (r.status === "pending" && !ro) || admin;
             return <div className="st-event watch-event" key={r.id}>
               <span className={"st-badge " + (r.kind === "FTD" ? "t-ftd" : "t-reg")}>{r.kind === "FTD" ? "FTD" : "ПЕРЕДЕП"}</span>
               <div><b>{r.client} · <span className="t-money">{money(r.amount)}</span></b>
-                <small>{day(r.day)}{admin ? " · " + who(r.handler) : ""} · <span className={tone}>{label}</span>{r.comment ? " · " + r.comment : ""}</small>
+                <small>{day(r.day)}{team ? " · " + who(r.handler) : ""} · <span className={tone}>{label}</span>{r.comment ? " · " + r.comment : ""}</small>
                 <div className="pay-actions">
                   {admin && r.status !== "approved" && <button className="mini-btn ok" onClick={() => review(r.id, "approved")}>Подтвердить</button>}
                   {admin && r.status !== "rejected" && <button className="mini-btn bad" onClick={() => review(r.id, "rejected")}>Отклонить</button>}
