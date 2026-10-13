@@ -3687,7 +3687,7 @@ PAYROLL_RULES_KEY = "payroll_rules"
 PAYROLL_DEFAULT_RULES = {
     "fix": 200,                 # $ per month
     # % of own approved sales by monthly CR dialog -> FTD; the highest tier whose "from" is reached applies.
-    "tiers": [{"from": 0, "rate": 4}, {"from": 10, "rate": 5}, {"from": 12, "rate": 6}],
+    "tiers": [{"from": 0, "rate": 4}, {"from": 10, "rate": 5}, {"from": 11, "rate": 6}],
     "video_bonus": 10,          # $ per video review
     "week_qftd": 10,            # qFTD per week needed for the weekly bonus
     "week_bonus": 50,           # $
