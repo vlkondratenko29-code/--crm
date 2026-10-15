@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .auth import validate_init_data, validate_login_widget, make_session, read_session
+from .auth import validate_init_data, hash_password, check_password, password_version, make_session, read_session
 from . import brokers as broker_lib
 from . import watch as watch_lib
 
@@ -31,6 +31,8 @@ CHATTERFY_WEBHOOK_URL = os.getenv("CHATTERFY_WEBHOOK_URL", "")
 CHATTERFY_WEBHOOK_SECRET = os.getenv("CHATTERFY_WEBHOOK_SECRET", "")
 # Bot token from @BotFather. Enables signed Telegram initData authentication.
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+# Signs website sessions. Changing it signs everyone out of the website.
+SESSION_SECRET = os.getenv("SESSION_SECRET", "") or TELEGRAM_BOT_TOKEN
 # Chat (user or group) that receives new FTD/REG notifications.
 TELEGRAM_NOTIFY_CHAT_ID = os.getenv("TELEGRAM_NOTIFY_CHAT_ID", "")
 NOTIFY_EVENTS = {x.strip().upper() for x in os.getenv("NOTIFY_EVENTS", "FTD").split(",") if x.strip()}
@@ -284,6 +286,8 @@ def init_db():
         add_column(conn, "crm_users", "tg_id", "TEXT")
         # Operator's login email in Chatterfy: links a chat's assigned operator to a CRM user.
         add_column(conn, "crm_users", "chatterfy_email", "TEXT")
+        # CRM website login: PBKDF2 hash of the password the admin (or the user) set; never the password itself.
+        add_column(conn, "crm_users", "password_hash", "TEXT")
         add_column(conn, "lead_work", "callback_at", "TEXT")
         add_column(conn, "lead_work", "callback_notified_at", "TEXT")
         conn.execute("""
@@ -722,11 +726,17 @@ def current_username(
     only honoured while TELEGRAM_BOT_TOKEN is not configured (or when
     ALLOW_USERNAME_HEADER=1 is set explicitly for local development).
     """
-    if authorization.lower().startswith("bearer ") and TELEGRAM_BOT_TOKEN and not x_telegram_init_data:
-        username = read_session(authorization[7:], TELEGRAM_BOT_TOKEN)
-        if not username:
-            raise HTTPException(status_code=401, detail="Сессия истекла. Войди через Telegram ещё раз.")
-        return username
+    if authorization.lower().startswith("bearer ") and SESSION_SECRET and not x_telegram_init_data:
+        session = read_session(authorization[7:], SESSION_SECRET)
+        if session:
+            conn = db()
+            try:
+                row = conn.execute("SELECT password_hash FROM crm_users WHERE lower(username)=%s", (session[0],)).fetchone()
+            finally:
+                conn.close()
+            if row and row["password_hash"] and password_version(row["password_hash"]) == session[1]:
+                return session[0]
+        raise HTTPException(status_code=401, detail="Сессия истекла. Войди ещё раз.")
     if x_telegram_init_data and TELEGRAM_BOT_TOKEN:
         tg_user = validate_init_data(x_telegram_init_data, TELEGRAM_BOT_TOKEN)
         if not tg_user:
@@ -742,47 +752,83 @@ def current_username(
 
 
 # ---------------------------------------------------------------------------
-# Website login: the CRM also opens in a normal browser via the Telegram Login Widget
+# CRM website: login (Telegram username) + password set in «Команда»
 # ---------------------------------------------------------------------------
 
-_bot_username_cache = {}
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_MINUTES = 15
+GENERATED_PASSWORD_LENGTH = 16  # ~94 bits: nobody picks a weak or reused password, only the CRM generates them
+_login_fails = {}  # username -> (failed attempts, locked until)
 
 
-def bot_username():
-    """The bot's @username for the login widget: TELEGRAM_BOT_USERNAME or asked from Telegram once."""
-    name = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
-    if name or not TELEGRAM_BOT_TOKEN:
-        return name
-    if "name" not in _bot_username_cache:
-        import urllib.request
-        try:
-            with urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10) as r:
-                _bot_username_cache["name"] = json.loads(r.read().decode()).get("result", {}).get("username", "")
-        except Exception:
-            return ""
-    return _bot_username_cache["name"]
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
-@app.get("/api/v1/auth/config")
-def auth_config():
-    name = bot_username()
-    return {"enabled": bool(TELEGRAM_BOT_TOKEN and name), "bot_username": name}
+def _generate_password():
+    import secrets
+    alphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no look-alikes: 0/O, 1/l/I
+    return "".join(secrets.choice(alphabet) for _ in range(GENERATED_PASSWORD_LENGTH))
 
 
-@app.post("/api/v1/auth/telegram-login")
-def telegram_login(payload: dict):
-    if not TELEGRAM_BOT_TOKEN:
-        raise HTTPException(status_code=400, detail="Вход на сайте не настроен: нет TELEGRAM_BOT_TOKEN")
-    tg_user = validate_login_widget(payload, TELEGRAM_BOT_TOKEN)
-    if not tg_user:
-        raise HTTPException(status_code=401, detail="Telegram не подтвердил вход. Попробуй ещё раз.")
-    username = (tg_user.get("username") or "").strip().lower()
-    if not username:
-        raise HTTPException(status_code=403, detail="Задай username в настройках Telegram, чтобы войти в CRM")
-    user = require_access(username)  # only people added in «Команда»
-    remember_tg_id(username, tg_user.get("id"))
-    token, expires = make_session(username, TELEGRAM_BOT_TOKEN)
-    return {"token": token, "username": user["username"], "role": user["role"], "expires": expires}
+@app.post("/api/v1/auth/login")
+def website_login(payload: LoginRequest):
+    if not SESSION_SECRET:
+        raise HTTPException(status_code=400, detail="Вход на сайте не настроен: задай SESSION_SECRET или TELEGRAM_BOT_TOKEN")
+    username = payload.username.strip().lstrip("@").lower()
+    now = datetime.utcnow()
+    fails, locked_until = _login_fails.get(username, (0, None))
+    if locked_until and locked_until > now:
+        minutes = int((locked_until - now).total_seconds() // 60) + 1
+        raise HTTPException(status_code=429, detail=f"Слишком много попыток. Попробуй через {minutes} мин.")
+    conn = db()
+    try:
+        row = conn.execute("SELECT username, role, active, password_hash FROM crm_users WHERE lower(username)=%s",
+                           (username,)).fetchone()
+    finally:
+        conn.close()
+    if not row or not row["active"] or not check_password(payload.password, row["password_hash"]):
+        fails += 1
+        _login_fails[username] = (fails, now + timedelta(minutes=LOGIN_LOCK_MINUTES) if fails >= LOGIN_MAX_FAILS else None)
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    _login_fails.pop(username, None)
+    token, expires = make_session(row["username"], password_version(row["password_hash"]), SESSION_SECRET)
+    return {"token": token, "username": row["username"], "role": row["role"], "expires": expires}
+
+
+@app.post("/api/v1/users/{username}/password")
+def generate_user_password(username: str, x_telegram_username: str = Depends(current_username)):
+    """Admin generates a member's website password. It is returned once and only its hash is kept;
+    a new one signs the member out of every browser that used the old one."""
+    target = username.lstrip("@").strip().lower()
+    password = _generate_password()
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        row = conn.execute("UPDATE crm_users SET password_hash=%s WHERE lower(username)=%s AND active=TRUE RETURNING username",
+                           (hash_password(password), target)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Нет такого активного участника в команде")
+        conn.commit()
+    finally:
+        conn.close()
+    _login_fails.pop(target, None)
+    return {"username": row["username"], "password": password}
+
+
+@app.delete("/api/v1/users/{username}/password")
+def revoke_user_password(username: str, x_telegram_username: str = Depends(current_username)):
+    """Admin takes website access away: the password stops working and every session ends."""
+    target = username.lstrip("@").strip().lower()
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        conn.execute("UPDATE crm_users SET password_hash=NULL WHERE lower(username)=%s", (target,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
 
 
 class TeamUser(BaseModel):
@@ -797,7 +843,7 @@ def list_users(x_telegram_username: str = Depends(current_username)):
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
-        rows = conn.execute("SELECT username, role, active, chatterfy_email FROM crm_users ORDER BY username").fetchall()
+        rows = conn.execute("SELECT username, role, active, chatterfy_email, password_hash IS NOT NULL AS has_password FROM crm_users ORDER BY username").fetchall()
         return {"users": [{**dict(row), "owner": row["username"].lower() in PRIMARY_ADMINS} for row in rows]}
     finally:
         conn.close()
@@ -836,7 +882,7 @@ def deactivate_user(username: str, x_telegram_username: str = Depends(current_us
         target = username.lstrip("@").strip().lower()
         if target in PRIMARY_ADMINS:
             raise HTTPException(status_code=400, detail="Владельца можно поменять только в настройке OWNER_USERNAMES на сервере")
-        conn.execute("UPDATE crm_users SET active=FALSE WHERE lower(username)=%s", (target,))
+        conn.execute("UPDATE crm_users SET active=FALSE, password_hash=NULL WHERE lower(username)=%s", (target,))
         conn.commit()
         return {"status": "ok"}
     finally:

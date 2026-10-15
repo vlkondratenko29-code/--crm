@@ -171,6 +171,37 @@ function App() {
     }
   }
 
+  // Website access: the CRM generates the password, it is shown here once and never stored in the open.
+  const [siteAccess, setSiteAccess] = useState(null);
+  async function generateSitePassword(member) {
+    if (member.has_password && !window.confirm(`Выдать @${member.username} новый пароль? Старый сразу перестанет работать.`)) return;
+    try {
+      const base = import.meta.env.VITE_API_URL || "";
+      const res = await fetch(`${base}/api/v1/users/${encodeURIComponent(member.username)}/password`, { method: "POST", headers: authHeaders(effectiveUser.username) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
+      setSiteAccess({ username: data.username, password: data.password, copied: false });
+      await loadTeam();
+    } catch (error) { setTeamMessage(error.message); }
+  }
+  async function revokeSitePassword(member) {
+    if (!window.confirm(`Закрыть @${member.username} вход на сайт? В мини-аппе доступ останется.`)) return;
+    try {
+      const base = import.meta.env.VITE_API_URL || "";
+      const res = await fetch(`${base}/api/v1/users/${encodeURIComponent(member.username)}/password`, { method: "DELETE", headers: authHeaders(effectiveUser.username) });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      setTeamMessage(`@${member.username}: вход на сайт закрыт.`);
+      await loadTeam();
+    } catch (error) { setTeamMessage(error.message); }
+  }
+  const siteAccessText = siteAccess && `CRM: ${window.location.origin}
+Логин: ${siteAccess.username}
+Пароль: ${siteAccess.password}`;
+  async function copySiteAccess() {
+    try { await navigator.clipboard.writeText(siteAccessText); setSiteAccess({ ...siteAccess, copied: true }); }
+    catch { setTeamMessage("Не получилось скопировать — выдели текст вручную."); }
+  }
+
   async function disableTeamUser(username) {
     const base = import.meta.env.VITE_API_URL || "";
     const res = await fetch(base + "/api/v1/users/" + encodeURIComponent(username), {
@@ -389,8 +420,17 @@ function App() {
           <button className="primary" type="button" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Добавляю…" : "Добавить"}</button>
         </div>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
+        {siteAccess && <div className="site-access">
+          <b>Данные для входа на сайт — показываются один раз</b>
+          <pre>{siteAccessText}</pre>
+          <div className="pay-actions">
+            <button className="primary" type="button" onClick={copySiteAccess}>{siteAccess.copied ? "Скопировано ✓" : "Скопировать"}</button>
+            <button className="link-btn" type="button" onClick={() => setSiteAccess(null)}>Готово, я сохранил</button>
+          </div>
+          <small>Отправь человеку лично. После закрытия пароль больше нигде не увидеть: потерял — выдай новый.</small>
+        </div>}
         <div className="team-list">
-          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.owner ? " · владелец" : ""}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {!member.owner ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
+          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.owner ? " · владелец" : ""}{member.has_password ? " · вход на сайт" : ""}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.active ? <button onClick={() => generateSitePassword(member)}>{member.has_password ? "Новый пароль" : "Пароль для сайта"}</button> : null}{member.has_password ? <button onClick={() => revokeSitePassword(member)}>Закрыть сайт</button> : null}{!member.owner ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
         </div>
       </section>}
       {loading && tab === "clients" && !openLead && <section className="card"><p>Ищу…</p></section>}
