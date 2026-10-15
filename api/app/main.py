@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .auth import validate_init_data
+from .auth import validate_init_data, validate_login_widget, make_session, read_session
 from . import brokers as broker_lib
 from . import watch as watch_lib
 
@@ -714,13 +714,19 @@ def require_admin(username: str, conn=None):
 def current_username(
     x_telegram_init_data: str = Header(default=""),
     x_telegram_username: str = Header(default=""),
+    authorization: str = Header(default=""),
 ):
-    """Resolve the caller from signed Telegram initData.
+    """Resolve the caller from signed Telegram initData (Mini App) or a website session.
 
     The plain X-Telegram-Username header can be forged by anyone, so it is
     only honoured while TELEGRAM_BOT_TOKEN is not configured (or when
     ALLOW_USERNAME_HEADER=1 is set explicitly for local development).
     """
+    if authorization.lower().startswith("bearer ") and TELEGRAM_BOT_TOKEN and not x_telegram_init_data:
+        username = read_session(authorization[7:], TELEGRAM_BOT_TOKEN)
+        if not username:
+            raise HTTPException(status_code=401, detail="Сессия истекла. Войди через Telegram ещё раз.")
+        return username
     if x_telegram_init_data and TELEGRAM_BOT_TOKEN:
         tg_user = validate_init_data(x_telegram_init_data, TELEGRAM_BOT_TOKEN)
         if not tg_user:
@@ -733,6 +739,50 @@ def current_username(
     if ALLOW_USERNAME_HEADER:
         return x_telegram_username.lstrip("@").strip().lower()
     raise HTTPException(status_code=401, detail="Open the CRM from Telegram")
+
+
+# ---------------------------------------------------------------------------
+# Website login: the CRM also opens in a normal browser via the Telegram Login Widget
+# ---------------------------------------------------------------------------
+
+_bot_username_cache = {}
+
+
+def bot_username():
+    """The bot's @username for the login widget: TELEGRAM_BOT_USERNAME or asked from Telegram once."""
+    name = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@")
+    if name or not TELEGRAM_BOT_TOKEN:
+        return name
+    if "name" not in _bot_username_cache:
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe", timeout=10) as r:
+                _bot_username_cache["name"] = json.loads(r.read().decode()).get("result", {}).get("username", "")
+        except Exception:
+            return ""
+    return _bot_username_cache["name"]
+
+
+@app.get("/api/v1/auth/config")
+def auth_config():
+    name = bot_username()
+    return {"enabled": bool(TELEGRAM_BOT_TOKEN and name), "bot_username": name}
+
+
+@app.post("/api/v1/auth/telegram-login")
+def telegram_login(payload: dict):
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(status_code=400, detail="Вход на сайте не настроен: нет TELEGRAM_BOT_TOKEN")
+    tg_user = validate_login_widget(payload, TELEGRAM_BOT_TOKEN)
+    if not tg_user:
+        raise HTTPException(status_code=401, detail="Telegram не подтвердил вход. Попробуй ещё раз.")
+    username = (tg_user.get("username") or "").strip().lower()
+    if not username:
+        raise HTTPException(status_code=403, detail="Задай username в настройках Telegram, чтобы войти в CRM")
+    user = require_access(username)  # only people added in «Команда»
+    remember_tg_id(username, tg_user.get("id"))
+    token, expires = make_session(username, TELEGRAM_BOT_TOKEN)
+    return {"token": token, "username": user["username"], "role": user["role"], "expires": expires}
 
 
 class TeamUser(BaseModel):

@@ -1,7 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
-import { authHeaders } from "./api.js";
+import { authHeaders, getSession, clearSession } from "./api.js";
+import Login from "./Login.jsx";
 import Leads, { LeadCard } from "./Leads.jsx";
 import Stats from "./Stats.jsx";
 import Watch from "./Watch.jsx";
@@ -20,7 +21,11 @@ const demoUser = import.meta.env.DEV ? { username: "jokwq", role: "admin", is_ad
 function App() {
   const telegramUser = tg?.initDataUnsafe?.user;
   const user = useMemo(() => {
-    if (!telegramUser) return demoUser;
+    if (!telegramUser) {
+      // CRM website: the user signed in with the Telegram Login Widget.
+      const session = getSession();
+      return session ? { username: session.username, role: "handler", is_admin: false, web: true } : demoUser;
+    }
     const username = telegramUser.username || "";
     // The real role comes from /api/v1/me right after start.
     return { username, role: "handler", is_admin: false };
@@ -28,6 +33,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [roleInfo, setRoleInfo] = useState(null);
   const [accessError, setAccessError] = useState("");
+  const [sessionGone, setSessionGone] = useState(false);
   const [client, setClient] = useState(null);
   const [results, setResults] = useState([]);
   const [searched, setSearched] = useState(false);
@@ -87,6 +93,7 @@ function App() {
           headers: authHeaders(effectiveUser.username)
         });
         if (response.ok) { setRoleInfo(await response.json()); setAccessError(""); }
+        else if (response.status === 401 && user.web) { clearSession(); setSessionGone(true); }
         else {
           const data = await response.json().catch(() => ({}));
           setAccessError(data.detail || "CRM access is not granted");
@@ -216,6 +223,9 @@ function App() {
 
   function go(id) { setTab(id); setMoreOpen(false); setOpenLead(null); window.scrollTo?.(0, 0); }
 
+  if (sessionGone) return <Login notice="Сессия истекла. Войди ещё раз." />;
+  if (!telegramUser && !user.web && !import.meta.env.DEV) return <Login />;
+
   if (accessError && !roleInfo) {
     return (
       <main className="app">
@@ -233,6 +243,7 @@ function App() {
       <header>
         <div><p className="eyebrow">BROKER CRM</p><h1>{TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 13.10</p></div>
         <div className="header-actions">
+          {user.web && <button className="link-btn" onClick={() => { clearSession(); window.location.reload(); }}>Выйти</button>}
           {canFullscreen && <button className="fullscreen-btn" title="На весь экран" onClick={() => tg.isFullscreen ? tg.exitFullscreen() : tg.requestFullscreen()}>⛶</button>}
           <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
         </div>

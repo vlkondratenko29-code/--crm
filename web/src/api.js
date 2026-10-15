@@ -4,9 +4,28 @@
 const tg = window.Telegram?.WebApp;
 const BASE = import.meta.env.VITE_API_URL || "";
 
+// Outside Telegram (the CRM website) the user signs in with the Telegram Login Widget and
+// gets a signed session token, kept in this browser.
+const SESSION_KEY = "crm_session";
+
+export function getSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+    return s && s.token && s.expires * 1000 > Date.now() ? s : null;
+  } catch { return null; }
+}
+export function saveSession(session) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify(session)); } catch { /* private mode: session lasts this page only */ }
+}
+export function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch { /* nothing to clear */ }
+}
+
 export function authHeaders(username) {
   const headers = { "X-Telegram-Init-Data": tg?.initData || "" };
   if (username) headers["X-Telegram-Username"] = username;
+  const session = !tg?.initData && getSession();
+  if (session) headers["Authorization"] = "Bearer " + session.token;
   return headers;
 }
 
