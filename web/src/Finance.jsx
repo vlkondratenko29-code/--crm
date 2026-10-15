@@ -50,7 +50,7 @@ function Cohorts({ data }) {
   const rows = data.cohorts.filter(c => c.leads);
   const cols = Math.max(1, ...rows.map(c => c[metric].filter(v => v != null).length));
   return <>
-    <div className="st-list">
+    <div className="st-list pnl-grid">
       {rows.slice().reverse().map(c => <div className="buy-row" key={c.month}>
         <div className="buy-head"><div><b>Когорта {monthLabel(c.month)}</b><small>{c.leads} лидов · {c.reg} REG · {c.ftd} FTD ({pct(c.lead_to_ftd)})</small></div>
           <b className={tone(c.roi)}>{pct(c.roi)}</b></div>
@@ -231,7 +231,7 @@ export default function Finance({ username }) {
       </div>}
       <div className="st-tabs">{[["pnl", "По месяцам"], ["cohorts", "Когорты"], ["entries", "Внести"]].map(([k, l]) =>
         <button key={k} className={view === k ? "selected" : ""} onClick={() => setView(k)}>{l}</button>)}</div>
-      {view === "pnl" && pnl && <div className="st-list">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} />)}
+      {view === "pnl" && pnl && <div className="st-list pnl-grid">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} />)}
         <p className="recon-hint">CPA (расчёт) — по месяцу FTD, по сетке FxPro: тир страны × сумма депозитов клиента за месяц FTD. IB — лоты × ставка, вносится во вкладке «Внести». Трафик за день берётся по большему из двух источников: отчёты баеров или Ads Manager, чтобы не считать дважды.</p></div>}
       {view === "cohorts" && cohorts && <Cohorts data={cohorts} />}
       {view === "entries" && <Entries username={username} rules={pnl?.rules} countries={pnl?.countries} geos={pnl?.geos || []} onChanged={load} />}

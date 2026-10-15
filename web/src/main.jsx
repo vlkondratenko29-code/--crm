@@ -68,6 +68,9 @@ function App() {
   const canSee = (id) => roleMeta.tabs.includes(id);
   const leadRoles = ["admin", "head_buying", "handler"];
   const [moreOpen, setMoreOpen] = useState(false);
+  // On a computer (wide window) the bottom bar becomes a side menu with every tab, no «Ещё».
+  const wide = useWide();
+  const canFullscreen = Boolean(tg?.requestFullscreen) && ["tdesktop", "macos", "weba", "webk", "web"].includes(tg?.platform);
   const [openLead, setOpenLead] = useState(null);
   // If a role switch (preview) hides the current tab, fall back to the role's first screen.
   React.useEffect(() => { if (!canSee(tab)) setTab(roleMeta.main[0]); }, [effectiveUser.role]);
@@ -229,7 +232,10 @@ function App() {
     <main className={"app role-" + effectiveUser.role}>
       <header>
         <div><p className="eyebrow">BROKER CRM</p><h1>{TAB_LABELS[tab]}</h1><p className="subtitle">FxPro · Chatterfy · сборка 13.10</p></div>
-        <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
+        <div className="header-actions">
+          {canFullscreen && <button className="fullscreen-btn" title="На весь экран" onClick={() => tg.isFullscreen ? tg.exitFullscreen() : tg.requestFullscreen()}>⛶</button>}
+          <div className="avatar">{effectiveUser.username?.[0]?.toUpperCase() || "?"}</div>
+        </div>
       </header>
 
       <section className="userbar">
@@ -493,13 +499,30 @@ function App() {
           <div className="more-grid">{roleMeta.more.map(id => <button key={id} className={tab === id ? "active" : ""} onClick={() => go(id)}><span>{TAB_ICONS[id]}</span>{TAB_LABELS[id]}</button>)}</div>
         </div>
       </div>}
-      <nav style={{ gridTemplateColumns: `repeat(${roleMeta.main.length + (roleMeta.more.length ? 1 : 0)}, minmax(0, 1fr))` }}>
+      {wide ? <nav className="side">
+        <p className="eyebrow">BROKER CRM</p>
+        {roleMeta.tabs.map(id => <button key={id} className={tab === id ? "active" : ""} onClick={() => go(id)}><span className="nav-icon">{TAB_ICONS[id]}</span>{TAB_LABELS[id]}</button>)}
+      </nav> : <nav style={{ gridTemplateColumns: `repeat(${roleMeta.main.length + (roleMeta.more.length ? 1 : 0)}, minmax(0, 1fr))` }}>
         {roleMeta.main.map(id => <button key={id} className={tab === id ? "active" : ""} onClick={() => go(id)}><span className="nav-icon">{TAB_ICONS[id]}</span>{TAB_LABELS[id]}</button>)}
         {roleMeta.more.length > 0 && <button className={roleMeta.more.includes(tab) || moreOpen ? "active" : ""} onClick={() => setMoreOpen(o => !o)}><span className="nav-icon">☰</span>{roleMeta.more.includes(tab) ? TAB_LABELS[tab] : "Ещё"}</button>}
-      </nav>
+      </nav>}
     </main>
   );
 }
+const WIDE_QUERY = "(min-width: 1100px)";
+
+function useWide() {
+  const [wide, setWide] = useState(() => window.matchMedia?.(WIDE_QUERY).matches ?? false);
+  React.useEffect(() => {
+    const mq = window.matchMedia?.(WIDE_QUERY);
+    if (!mq) return;
+    const update = () => setWide(mq.matches);
+    mq.addEventListener?.("change", update);
+    return () => mq.removeEventListener?.("change", update);
+  }, []);
+  return wide;
+}
+
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
   finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",

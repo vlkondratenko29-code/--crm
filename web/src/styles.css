@@ -446,3 +446,22 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 @media (max-width:420px){.pnl-lines{grid-template-columns:1fr}}
 .tier-country{align-self:center;font-size:13px;text-transform:capitalize}
 .tier-country small{color:#8993a3;text-transform:none}
+
+/* Computer: side menu with every tab, content uses the whole window */
+.header-actions{display:flex;align-items:center;gap:8px}
+.fullscreen-btn{width:38px;height:38px;border-radius:50%;background:#1c2430;color:#c6d2e2;font-size:17px}
+@media (min-width:1100px){
+  .app{max-width:none;margin:0;padding:28px 36px 48px 276px}
+  nav.side{left:16px;top:16px;bottom:16px;transform:none;width:232px;display:flex;flex-direction:column;align-items:stretch;gap:3px;padding:16px 10px;overflow-y:auto;border-radius:18px}
+  nav.side .eyebrow{padding:0 10px 10px}
+  nav.side button{flex-direction:row;justify-content:flex-start;gap:12px;padding:11px 12px;font-size:14px;text-align:left;flex:none}
+  nav.side button.active:after{display:none}
+  nav.side .nav-icon{width:20px;text-align:center;font-size:16px}
+  .more-backdrop{display:none}
+  .st-kpis b{font-size:30px}
+  .pnl-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:12px;align-items:start}
+  .pnl-grid>.recon-hint,.pnl-grid>.empty-state{grid-column:1/-1}
+  .cohort-table{font-size:14px;width:auto;min-width:min(100%,560px)}
+  .cohort-table td{min-width:84px}
+  .cohort-table th,.cohort-table td{padding:11px 14px}
+}
