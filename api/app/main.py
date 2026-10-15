@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import csv
 import json
 import os
@@ -288,6 +288,7 @@ def init_db():
         add_column(conn, "crm_users", "chatterfy_email", "TEXT")
         # CRM website login: PBKDF2 hash of the password the admin (or the user) set; never the password itself.
         add_column(conn, "crm_users", "password_hash", "TEXT")
+        add_column(conn, "crm_users", "digest_off", "BOOLEAN")  # admin turned the morning summary off
         add_column(conn, "lead_work", "callback_at", "TEXT")
         add_column(conn, "lead_work", "callback_notified_at", "TEXT")
         conn.execute("""
@@ -1169,6 +1170,7 @@ def _notify_loop():
             try:
                 run_callback_reminders(conn)
                 run_stage_notices(conn)
+                run_daily_digest(conn)
             finally:
                 conn.close()
         except Exception as exc:
@@ -4693,8 +4695,8 @@ def _campaign_geos(leads):
     return {k: max(v, key=v.get) for k, v in votes.items()}
 
 
-def _traffic_by_month(conn, geo=None, campaign_geos=None):
-    """Traffic spend per month, of one GEO if given. Per day the larger of buyer reports and Ads Manager
+def _traffic_by_day(conn, geo=None, campaign_geos=None):
+    """Traffic spend per day, of one GEO if given. Per day the larger of buyer reports and Ads Manager
     is taken, so the two sources never double count and a day filled in only one of them is still covered."""
     def by_day(table):  # (day, GEO of the campaign) -> spend
         out = {}
@@ -4707,7 +4709,14 @@ def _traffic_by_month(conn, geo=None, campaign_geos=None):
     for k in set(reports) | set(ads):  # the max is taken per GEO, so the GEOs add up to the total
         if geo and k[1] != geo:
             continue
-        out[k[0][:7]] = out.get(k[0][:7], 0.0) + max(reports.get(k, 0.0), ads.get(k, 0.0))
+        out[k[0]] = out.get(k[0], 0.0) + max(reports.get(k, 0.0), ads.get(k, 0.0))
+    return out
+
+
+def _traffic_by_month(conn, geo=None, campaign_geos=None):
+    out = {}
+    for day, spend in _traffic_by_day(conn, geo, campaign_geos).items():
+        out[day[:7]] = out.get(day[:7], 0.0) + spend
     return out
 
 
@@ -4991,6 +5000,146 @@ def save_finance_rules(payload: dict, x_telegram_username: str = Depends(current
     finally:
         conn.close()
     return {"status": "ok", "rules": rules}
+
+
+# ---------------------------------------------------------------------------
+# Morning summary for admins in Telegram: yesterday, the month so far and a forecast
+# ---------------------------------------------------------------------------
+
+DIGEST_HOUR = int(os.getenv("DIGEST_HOUR", "9"))  # team time (Turkey); sent on the first loop after it
+DIGEST_LAST_KEY = "digest_last_day"
+MONTHS_RU = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+MONTHS_RU_NOM = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+
+
+def _usd(v):
+    v = float(v or 0)
+    return ("−$" if v < 0 else "$") + f"{abs(v):,.0f}".replace(",", " ")
+
+
+def _pct(part, base):
+    return f"{(part - base) / base * 100:+.0f}%" if base else "—"
+
+
+def build_digest(conn, admin_username):
+    """Text of the morning summary for the day before today (team time)."""
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    day = today - timedelta(days=1)
+    d, month = day.isoformat(), day.isoformat()[:7]
+    leads = build_leads(conn, {"role": "admin", "username": "system"})
+    cpa_of = lead_cpa(conn, leads)
+    campaign_geos = _campaign_geos(leads)
+    spend_day = _traffic_by_day(conn, None, campaign_geos).get(d, 0.0)
+
+    y = {"leads": 0, "reg": 0, "ftd": 0, "cpa": 0.0}
+    by_geo = {}
+    for x in leads:
+        lead_day, reg_day, ftd_day, _ = lead_funnel_days(x)
+        g = by_geo.setdefault(x["geo"], {"leads": 0, "ftd": 0, "cpa": 0.0})
+        if lead_day == d:
+            y["leads"] += 1
+            g["leads"] += 1
+        y["reg"] += int(reg_day == d)
+        if ftd_day == d:
+            y["ftd"] += 1
+            y["cpa"] += cpa_of.get(x["lead_key"], 0.0)
+            g["ftd"] += 1
+            g["cpa"] += cpa_of.get(x["lead_key"], 0.0)
+
+    # The month of yesterday from the P&L (on the 1st that is the whole previous month).
+    pnl = profit_and_loss(months=2, geo="", x_telegram_username=admin_username)
+    m = next((r for r in pnl["months"] if r["month"] == month), None)
+
+    lines = [f"📊 Сводка за {day.day} {MONTHS_RU[day.month - 1]}", "",
+             f"Вчера: лиды {y['leads']} · реги {y['reg']} · FTD {y['ftd']}",
+             f"Трафик {_usd(spend_day)} · доход CPA {_usd(y['cpa'])} · ROI {_pct(y['cpa'], spend_day)}"]
+    if y["ftd"]:
+        lines.append(f"Цена FTD {_usd(spend_day / y['ftd'])}")
+    geos = {k: v for k, v in by_geo.items() if v["leads"] or v["ftd"]}
+    if len(geos) > 1:
+        lines.append("По ГЕО: " + " · ".join(f"{k} {v['leads']} лид. / {v['ftd']} FTD / {_usd(v['cpa'])}" for k, v in sorted(geos.items())))
+    if m:
+        days_in_month = (date(day.year + day.month // 12, day.month % 12 + 1, 1) - timedelta(days=1)).day
+        cpa_mtd, traffic_mtd = m["income"].get("CPA", 0.0), m["expense"].get("Трафик", 0.0)
+        forecast = (cpa_mtd - traffic_mtd) / day.day * days_in_month
+        lines += ["", f"{MONTHS_RU_NOM[day.month - 1]} (1–{day.day}): FTD {m['ftd']}",
+                  f"Доход {_usd(m['income_total'])} (CPA {_usd(cpa_mtd)}, IB {_usd(m['income'].get('IB', 0))})",
+                  f"Расход {_usd(m['expense_total'])} (трафик {_usd(traffic_mtd)}, ЗП {_usd(m['expense'].get('ЗП', 0))})",
+                  f"Прибыль {_usd(m['profit'])} · ROI {'—' if m['roi'] is None else str(m['roi']) + '%'}",
+                  f"Прогноз CPA − трафик на месяц ≈ {_usd(forecast)} (по темпу {day.day} дн.)"]
+    lines += ["", "IB и ручные расходы — по внесённым в «P&L». Подробно: вкладка «P&L» в CRM."]
+    return "\n".join(lines)
+
+
+def _digest_recipients(conn):
+    return [r["username"] for r in conn.execute(
+        "SELECT username FROM crm_users WHERE active=TRUE AND role='admin' AND tg_id IS NOT NULL AND digest_off IS NOT TRUE"
+    ).fetchall()]
+
+
+def run_daily_digest(conn, force=False):
+    """Called by the notify loop: once a day after DIGEST_HOUR (team time), to every admin who did not turn it off.
+    A sleeping free server sends it on the first loop after it wakes up."""
+    now = datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)
+    today = now.date().isoformat()
+    if not force and (now.hour < DIGEST_HOUR or get_setting(conn, DIGEST_LAST_KEY, "") == today):
+        return
+    recipients = _digest_recipients(conn)
+    set_setting(conn, DIGEST_LAST_KEY, today, "system")  # mark first, so a slow build is never sent twice
+    conn.commit()
+    if not recipients:
+        return
+    text = build_digest(conn, recipients[0])
+    for username in recipients:
+        ok, err = send_telegram_checked(user_tg_id(conn, username), text)
+        if not ok:
+            print(f"[digest] @{username}: {err}")
+
+
+class DigestSetting(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/v1/digest")
+def digest_status(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        row = conn.execute("SELECT tg_id, digest_off FROM crm_users WHERE lower(username)=%s", (admin.lower(),)).fetchone()
+    finally:
+        conn.close()
+    return {"enabled": not (row and row["digest_off"]), "hour": DIGEST_HOUR,
+            "can_receive": bool(row and row["tg_id"] and TELEGRAM_BOT_TOKEN)}
+
+
+@app.post("/api/v1/digest")
+def digest_toggle(payload: DigestSetting, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        conn.execute("UPDATE crm_users SET digest_off=%s WHERE lower(username)=%s", (not payload.enabled, admin.lower()))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"enabled": payload.enabled}
+
+
+@app.post("/api/v1/digest/test")
+def digest_test(x_telegram_username: str = Depends(current_username)):
+    """Send the summary to yourself right now."""
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        chat_id = user_tg_id(conn, admin)
+        if not chat_id:
+            raise HTTPException(status_code=400, detail="Открой мини-апп из Telegram хотя бы раз, чтобы бот знал, куда писать")
+        text = build_digest(conn, admin)
+    finally:
+        conn.close()
+    ok, err = send_telegram_checked(chat_id, text)
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"Не удалось отправить: {err}")
+    return {"status": "ok", "text": text}
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.

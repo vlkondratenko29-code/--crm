@@ -193,6 +193,31 @@ function Entries({ username, rules, countries, geos, onChanged }) {
   </>;
 }
 
+// Morning summary in Telegram for admins: on/off for me and «send now».
+function Digest({ username }) {
+  const [d, setD] = useState(null);
+  const [msg, setMsg] = useState("");
+  useEffect(() => { api("/api/v1/digest", { username }).then(setD).catch(() => setD(null)); }, [username]);
+  if (!d) return null;
+  async function toggle() {
+    try { setD({ ...d, ...(await api("/api/v1/digest", { username, method: "POST", body: { enabled: !d.enabled } })) }); }
+    catch (e) { setMsg(e.message); }
+  }
+  async function sendNow() {
+    setMsg("Отправляю…");
+    try { await api("/api/v1/digest/test", { username, method: "POST", timeout: 90000 }); setMsg("Сводка отправлена тебе в Telegram."); }
+    catch (e) { setMsg(e.message); }
+  }
+  return (
+    <div className="digest-bar">
+      <span>📬 Сводка в Telegram каждый день в {String(d.hour).padStart(2, "0")}:00</span>
+      <button className={d.enabled ? "mini-btn ok" : "mini-btn"} onClick={toggle}>{d.enabled ? "Включена" : "Выключена"}</button>
+      <button className="mini-btn" onClick={sendNow}>Прислать сейчас</button>
+      {msg && <small>{msg}</small>}
+    </div>
+  );
+}
+
 export default function Finance({ username }) {
   const [view, setView] = useState("pnl");
   const [months, setMonths] = useState("6");
@@ -218,6 +243,7 @@ export default function Finance({ username }) {
     <section className="role-dashboard stats-screen">
       <div className="role-hero"><div><p className="eyebrow">P&L · КОГОРТЫ</p><h2>Прибыль проекта</h2>
         <p>CPA и IB минус трафик, ЗП и остальные расходы. Когорты по месяцу прихода лида.</p></div><span>📒</span></div>
+      <Digest username={username} />
       <div className="period-switch">{PERIODS.map(([v, l]) => <button key={v} className={months === v ? "selected" : ""} onClick={() => setMonths(v)}>{l}</button>)}</div>
       {pnl?.geos?.length > 1 && <div className="period-switch filter-switch">
         {[["", "Все ГЕО"], ...pnl.geos.map(g => [g, g])].map(([v, l]) => <button key={v} className={geo === v ? "selected" : ""} onClick={() => setGeo(v)}>{l}</button>)}</div>}
