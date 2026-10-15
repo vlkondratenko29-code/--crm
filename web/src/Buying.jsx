@@ -25,6 +25,19 @@ export default function Buying({ username, days }) {
     catch (e) { setError(e.message); }
   }, [days, level, username]);
   useEffect(() => { load(); }, [load]);
+  const [fb, setFb] = useState(null);
+  useEffect(() => { api("/api/v1/ads/facebook", { username }).then(setFb).catch(() => setFb(null)); }, [username]);
+  async function syncFacebook(daysBack) {
+    setBusy(true); setMsg("Забираю расходы из Facebook…");
+    try {
+      const r = await api(`/api/v1/ads/facebook/sync?days=${daysBack}`, { username, method: "POST", timeout: 120000 });
+      const bad = r.accounts.filter(a => a.error);
+      setMsg(`Facebook: ${r.rows} строк, расход ${r.spend} за ${r.since} — ${r.until}` + (bad.length ? ` · ошибки: ${bad.map(a => a.id + " — " + a.error).join("; ")}` : ""));
+      setFb({ ...fb, last: r });
+      await load();
+    } catch (err) { setMsg(err.message); }
+    finally { setBusy(false); }
+  }
 
   async function upload(e) {
     const files = [...(e.target.files || [])];
@@ -54,8 +67,19 @@ export default function Buying({ username, days }) {
           <input ref={fileRef} type="file" accept=".csv,text/csv" multiple hidden disabled={busy} onChange={upload} />
         </label>
       </div>
+      {fb?.configured && <div className="buy-upload">
+        <div>
+          <b>Facebook подключён · {fb.accounts} кабинет(а)</b>
+          <small>{fb.last ? "Обновлено " + new Date(fb.last.at + "Z").toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) + ` · сам обновляется раз в ${fb.every_minutes} мин` : "Ещё не обновлялось"}</small>
+          {fb.last?.accounts?.filter(a => a.error).map(a => <small key={a.id} className="t-bad">{a.id}: {a.error}</small>)}
+        </div>
+        <div className="pay-actions">
+          <button className="upload-btn" disabled={busy} onClick={() => syncFacebook(3)}>Обновить сейчас</button>
+          <button className="mini-btn" disabled={busy} onClick={() => syncFacebook(30)}>За 30 дней</button>
+        </div>
+      </div>}
       {msg && <div className="team-message">{msg}</div>}
-      <p className="recon-hint">Ads Manager → Отчёты → разбивка «По дням» → уровень кампаний, групп или объявлений → Экспорт CSV. Можно грузить каждый день: повторные дни перезаписываются.</p>
+      <p className="recon-hint">{fb?.configured ? "Расход из Facebook подтягивается сам. CSV нужен только для кабинетов, которые не подключены. " : ""}Ads Manager → Отчёты → разбивка «По дням» → уровень кампаний, групп или объявлений → Экспорт CSV. Можно грузить каждый день: повторные дни перезаписываются.</p>
 
       {error && <div className="team-message">{error}</div>}
       {t && <div className="buy-kpis">

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from .auth import validate_init_data, hash_password, check_password, password_version, make_session, read_session
 from . import brokers as broker_lib
 from . import watch as watch_lib
+from . import facebook as fb_lib
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
@@ -1168,9 +1169,13 @@ def _notify_loop():
         try:
             conn = db()
             try:
-                run_callback_reminders(conn)
-                run_stage_notices(conn)
-                run_daily_digest(conn)
+                # each job on its own, so one failing (e.g. Facebook down) does not stop the others
+                for job in (run_callback_reminders, run_stage_notices, run_daily_digest, maybe_facebook_sync):
+                    try:
+                        job(conn)
+                    except Exception as exc:
+                        conn.rollback()
+                        print(f"notify loop {job.__name__}: {type(exc).__name__}: {exc}")
             finally:
                 conn.close()
         except Exception as exc:
@@ -3505,28 +3510,103 @@ async def import_ad_spend(files: list[UploadFile] = File(...), x_telegram_userna
         rows = []
         for f in files:
             rows += parse_ads_manager(await f.read())
-        merged = {}
-        for r in rows:  # several lines for the same key in one upload are summed
-            k = (r["day"], r["campaign"], r["adset"], r["ad"])
-            if k in merged:
-                for f in ("spend", "impressions", "clicks"):
-                    merged[k][f] += r[f]
-            else:
-                merged[k] = dict(r)
-        now = datetime.utcnow().isoformat()
-        for r in merged.values():
-            conn.execute(
-                "INSERT INTO ad_spend(day, campaign, adset, ad, spend, impressions, clicks, currency, uploaded_at, uploaded_by) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(day, campaign, adset, ad) DO UPDATE SET "
-                "spend=excluded.spend, impressions=excluded.impressions, clicks=excluded.clicks, currency=excluded.currency, "
-                "uploaded_at=excluded.uploaded_at, uploaded_by=excluded.uploaded_by",
-                (r["day"], r["campaign"], r["adset"], r["ad"], round(r["spend"], 4), r["impressions"], r["clicks"], r["currency"], now, user["username"]),
-            )
-        conn.commit()
-        days = sorted({r["day"] for r in merged.values()})
-        return {"rows": len(merged), "days": [days[0], days[-1]] if days else [],
-                "spend": round(sum(r["spend"] for r in merged.values()), 2),
-                "currency": sorted({r["currency"] for r in merged.values()})}
+        return store_ad_spend(conn, rows, user["username"])
+    finally:
+        conn.close()
+
+
+def store_ad_spend(conn, rows, uploaded_by):
+    """Upsert daily spend rows (CSV upload or Facebook API); a repeated day + ad overwrites the old figure."""
+    merged = {}
+    for r in rows:  # several lines for the same key are summed
+        k = (r["day"], r["campaign"], r["adset"], r["ad"])
+        if k in merged:
+            for f in ("spend", "impressions", "clicks"):
+                merged[k][f] += r[f]
+        else:
+            merged[k] = dict(r)
+    now = datetime.utcnow().isoformat()
+    for r in merged.values():
+        conn.execute(
+            "INSERT INTO ad_spend(day, campaign, adset, ad, spend, impressions, clicks, currency, uploaded_at, uploaded_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(day, campaign, adset, ad) DO UPDATE SET "
+            "spend=excluded.spend, impressions=excluded.impressions, clicks=excluded.clicks, currency=excluded.currency, "
+            "uploaded_at=excluded.uploaded_at, uploaded_by=excluded.uploaded_by",
+            (r["day"], r["campaign"], r["adset"], r["ad"], round(r["spend"], 4), r["impressions"], r["clicks"], r["currency"], now, uploaded_by),
+        )
+    conn.commit()
+    days = sorted({r["day"] for r in merged.values()})
+    return {"rows": len(merged), "days": [days[0], days[-1]] if days else [],
+            "spend": round(sum(r["spend"] for r in merged.values()), 2),
+            "currency": sorted({r["currency"] for r in merged.values()})}
+
+
+# Facebook Marketing API: spend comes in by itself instead of CSV uploads.
+FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN", "").strip()
+FB_AD_ACCOUNT_IDS = [a.strip() for a in os.getenv("FB_AD_ACCOUNT_IDS", "").split(",") if a.strip()]
+FB_SYNC_MINUTES = int(os.getenv("FB_SYNC_MINUTES", "60"))
+FB_SYNC_DAYS = 3  # FB keeps adjusting the last days' spend, so they are re-read every time
+FB_STATUS_KEY = "facebook_sync_status"
+_fb_last_run = {"at": None}
+
+
+def run_facebook_sync(conn, days=FB_SYNC_DAYS):
+    """Read the last `days` days of spend from every configured ad account into ad_spend."""
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    since, until = (today - timedelta(days=max(1, days) - 1)).isoformat(), today.isoformat()
+    status = {"at": datetime.utcnow().isoformat(), "since": since, "until": until, "accounts": [], "rows": 0, "spend": 0.0}
+    for account in FB_AD_ACCOUNT_IDS:
+        try:
+            rows = fb_lib.fetch_spend(FB_ACCESS_TOKEN, account, since, until)
+            stored = store_ad_spend(conn, rows, "facebook-api")
+            status["accounts"].append({"id": fb_lib.account_id(account), "rows": stored["rows"], "spend": stored["spend"],
+                                       "currency": stored["currency"]})
+            status["rows"] += stored["rows"]
+            status["spend"] += stored["spend"]
+        except Exception as exc:  # one broken account must not stop the others
+            status["accounts"].append({"id": fb_lib.account_id(account), "error": str(exc)[:300]})
+    status["spend"] = round(status["spend"], 2)
+    set_setting(conn, FB_STATUS_KEY, json.dumps(status), "system")
+    conn.commit()
+    _fb_last_run["at"] = datetime.utcnow()
+    return status
+
+
+def maybe_facebook_sync(conn):
+    """Called by the background loop: at most once per FB_SYNC_MINUTES."""
+    if not (FB_ACCESS_TOKEN and FB_AD_ACCOUNT_IDS):
+        return
+    last = _fb_last_run["at"]
+    if last and datetime.utcnow() - last < timedelta(minutes=FB_SYNC_MINUTES):
+        return
+    run_facebook_sync(conn)
+
+
+@app.get("/api/v1/ads/facebook")
+def facebook_status(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Только админ и хэд баинга")
+        raw = get_setting(conn, FB_STATUS_KEY, "")
+    finally:
+        conn.close()
+    return {"configured": bool(FB_ACCESS_TOKEN and FB_AD_ACCOUNT_IDS), "accounts": len(FB_AD_ACCOUNT_IDS),
+            "every_minutes": FB_SYNC_MINUTES, "last": json.loads(raw) if raw else None}
+
+
+@app.post("/api/v1/ads/facebook/sync")
+def facebook_sync_now(days: int = FB_SYNC_DAYS, x_telegram_username: str = Depends(current_username)):
+    """Pull spend from Facebook right now; days=30 back-fills a month."""
+    if not (FB_ACCESS_TOKEN and FB_AD_ACCOUNT_IDS):
+        raise HTTPException(status_code=400, detail="Facebook не подключён: на сервере нужны FB_ACCESS_TOKEN и FB_AD_ACCOUNT_IDS")
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in LEAD_MANAGER_ROLES:
+            raise HTTPException(status_code=403, detail="Только админ и хэд баинга")
+        return run_facebook_sync(conn, max(1, min(int(days), 90)))
     finally:
         conn.close()
 
