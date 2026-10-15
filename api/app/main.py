@@ -4,6 +4,7 @@ import json
 import os
 import io
 import threading
+import urllib.parse
 import uuid
 import re
 
@@ -289,6 +290,25 @@ def init_db():
         add_column(conn, "crm_users", "chatterfy_email", "TEXT")
         # CRM website login: PBKDF2 hash of the password the admin (or the user) set; never the password itself.
         add_column(conn, "crm_users", "password_hash", "TEXT")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id TEXT PRIMARY KEY,
+                at TEXT NOT NULL,
+                actor TEXT,
+                action TEXT,
+                path TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_at ON audit_log(at)")
+        # Monthly plan: FTD, CPA income, profit, traffic budget.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS finance_targets (
+                month TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value DOUBLE PRECISION,
+                PRIMARY KEY (month, metric)
+            )
+        """)
         add_column(conn, "crm_users", "digest_off", "BOOLEAN")  # admin turned the morning summary off
         add_column(conn, "lead_work", "callback_at", "TEXT")
         add_column(conn, "lead_work", "callback_notified_at", "TEXT")
@@ -429,6 +449,60 @@ def init_db():
 init_db()
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
+
+# Action log for the owner: who changed what and when. Only the action is stored — never the request
+# body, so passwords, amounts or client data never end up in the log.
+AUDIT_SKIP = re.compile(r"^/(webhook/|api/v1/(leads/|auth/|watch/run|chatterfy/push|notify/test|digest/test|ads/facebook/sync))")
+AUDIT_LABELS = [
+    ("POST", r"^/api/v1/users$", "Команда: добавил / изменил участника"),
+    ("DELETE", r"^/api/v1/users/([^/]+)$", "Команда: отключил @{0}"),
+    ("POST", r"^/api/v1/users/([^/]+)/password$", "Сайт: выдал новый пароль @{0}"),
+    ("DELETE", r"^/api/v1/users/([^/]+)/password$", "Сайт: закрыл вход @{0}"),
+    ("POST", r"^/api/v1/users/([^/]+)/email$", "Сайт: изменил почту @{0}"),
+    ("POST", r"^/api/v1/users/([^/]+)/invite$", "Сайт: отправил приглашение @{0}"),
+    ("POST", r"^/api/v1/finance/entries$", "P&L: добавил запись"),
+    ("DELETE", r"^/api/v1/finance/entries/", "P&L: удалил запись"),
+    ("POST", r"^/api/v1/settings/finance$", "P&L: изменил условия CPA / IB"),
+    ("POST", r"^/api/v1/targets$", "P&L: изменил план на месяц"),
+    ("POST", r"^/api/v1/settings/payroll$", "ЗП: изменил правила"),
+    ("POST", r"^/api/v1/payroll/extras$", "ЗП: изменил видеоотзывы / диалоги"),
+    ("POST", r"^/api/v1/payroll/deposits/[^/]+/review$", "ЗП: проверил депозит обработчика"),
+    ("DELETE", r"^/api/v1/payroll/deposits/", "ЗП: удалил депозит"),
+    ("POST", r"^/api/v1/settings/chatterfy-postback$", "Сверка: изменил ссылку постбэка"),
+    ("POST", r"^/api/v1/settings/data-since$", "Настройки: изменил дату начала данных"),
+    ("POST", r"^/api/v1/settings/auto-assign$", "Настройки: авто-распределение лидов"),
+    ("POST", r"^/api/v1/settings/watch$", "Контроль: изменил настройки"),
+    ("POST", r"^/api/v1/(broker|chatterfy)/.*import$", "Сверка: загрузил отчёт"),
+    ("POST", r"^/api/v1/ads/spend/import$", "Баинг: загрузил расход CSV"),
+]
+
+
+def audit_label(method, path):
+    for m, pattern, label in AUDIT_LABELS:
+        found = re.match(pattern, path)
+        if m == method and found:
+            return label.format(*[urllib.parse.unquote(g) for g in found.groups()])
+    return f"{method} {path}"
+
+
+@app.middleware("http")
+async def audit_changes(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and path.startswith("/api/") and not AUDIT_SKIP.match(path) \
+            and response.status_code < 400 and getattr(request.state, "actor", None):
+        try:
+            conn = db()
+            try:
+                conn.execute("INSERT INTO audit_log(id, at, actor, action, path) VALUES(%s,%s,%s,%s,%s)",
+                             (uuid.uuid4().hex, datetime.utcnow().isoformat(), request.state.actor,
+                              audit_label(request.method, path), f"{request.method} {path}"[:300]))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:  # the log must never break the action itself
+            print(f"[audit] {type(exc).__name__}: {exc}")
+    return response
 
 
 @app.middleware("http")
@@ -718,10 +792,18 @@ def require_admin(username: str, conn=None):
 
 
 def current_username(
+    request: Request,
     x_telegram_init_data: str = Header(default=""),
     x_telegram_username: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
+    """The caller's username; also kept on the request for the action log."""
+    username = _resolve_username(x_telegram_init_data, x_telegram_username, authorization)
+    request.state.actor = username
+    return username
+
+
+def _resolve_username(x_telegram_init_data, x_telegram_username, authorization):
     """Resolve the caller from signed Telegram initData (Mini App) or a website session.
 
     The plain X-Telegram-Username header can be forged by anyone, so it is
@@ -4735,6 +4817,10 @@ def _country_key(country):
     return re.sub(r"\s+", " ", str(country or "").strip().lower())
 
 
+def cpa_tier(country, rules):
+    return rules["country_tiers"].get(_country_key(country)) or rules["default_tier"]
+
+
 def cpa_payout(amount, country, rules):
     """CPA for one client: the grid cell of their country's tier and deposited amount."""
     if not amount or amount <= 0:
@@ -4827,7 +4913,7 @@ def _lead_rows(leads, rules, account_money):
                     by_month[month] = by_month.get(month, 0.0) + amount
             if not any(by_month.values()) and dep:  # no broker snapshots: the known deposit belongs to the FTD month
                 by_month = {ftd_month: dep}
-        out.append({"lead_key": x["lead_key"], "lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day), "geo": x["geo"],
+        out.append({"tier": cpa_tier(country, rules), "lead_key": x["lead_key"], "lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day), "geo": x["geo"],
                     "ftd_month": ftd_month, "country": country, "deposits_by_month": by_month,
                     "cpa": cpa_payout(by_month.get(ftd_month, 0.0), country, rules) if ftd_month else 0.0})
     return out
@@ -5147,6 +5233,19 @@ def build_digest(conn, admin_username):
                   f"Расход {_usd(m['expense_total'])} (трафик {_usd(traffic_mtd)}, ЗП {_usd(m['expense'].get('ЗП', 0))})",
                   f"Прибыль {_usd(m['profit'])} · ROI {'—' if m['roi'] is None else str(m['roi']) + '%'}",
                   f"Прогноз CPA − трафик на месяц ≈ {_usd(forecast)} (по темпу {day.day} дн.)"]
+    try:
+        plan = month_plan(conn, month, admin_username)
+        names = {"ftd": "FTD", "cpa": "CPA", "profit": "прибыль", "traffic": "трафик"}
+        parts = []
+        for k in TARGET_METRICS:
+            target = plan["targets"].get(k)
+            fact, fc = plan["fact"].get(k, 0), plan["forecast"].get(k, 0)
+            val = (lambda v: f"{v:.0f}") if k == "ftd" else _usd
+            parts.append(f"{names.get(k, k)} {val(fact)} из {val(target)} ({fact / target * 100:.0f}%, прогноз {val(fc)})" if target else "")
+        if any(parts):
+            lines += ["", "План: " + " · ".join(p for p in parts if p)]
+    except Exception as exc:
+        print(f"[digest] plan: {type(exc).__name__}: {exc}")
     lines += ["", "IB и ручные расходы — по внесённым в «P&L». Подробно: вкладка «P&L» в CRM."]
     return "\n".join(lines)
 
@@ -5220,6 +5319,115 @@ def digest_test(x_telegram_username: str = Depends(current_username)):
     if not ok:
         raise HTTPException(status_code=400, detail=f"Не удалось отправить: {err}")
     return {"status": "ok", "text": text}
+
+
+# ---------------------------------------------------------------------------
+# Owner: monthly plan vs fact, FTD list to reconcile CPA with the broker, action log
+# ---------------------------------------------------------------------------
+
+TARGET_METRICS = ("ftd", "cpa", "profit", "traffic")  # traffic is a budget: staying under it is good
+
+
+class TargetsSet(BaseModel):
+    month: str
+    targets: dict
+
+
+def month_plan(conn, month, admin_username):
+    """Targets of the month, the fact so far and a forecast at the current pace."""
+    _month_bounds(month)
+    targets = {r["metric"]: r["value"] for r in conn.execute(
+        "SELECT metric, value FROM finance_targets WHERE month=%s", (month,)).fetchall() if r["value"] is not None}
+    now = _current_month()
+    pnl = profit_and_loss(months=max(1, _months_between(month, now) + 1), geo="", x_telegram_username=admin_username)
+    m = next((r for r in pnl["months"] if r["month"] == month), None)
+    fact = {"ftd": m["ftd"] if m else 0, "cpa": m["income"].get("CPA", 0.0) if m else 0.0,
+            "profit": m["profit"] if m else 0.0, "traffic": m["expense"].get("Трафик", 0.0) if m else 0.0}
+    start, end = _month_bounds(month)
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    days_total = end.day
+    days_passed = days_total if month < now else max(1, min(days_total, (today - start).days + 1)) if month == now else 0
+    scale = days_total / days_passed if days_passed else 0
+    forecast = {k: round(v * scale, 2) for k, v in fact.items()} if month == now else dict(fact)
+    return {"month": month, "targets": targets, "fact": {k: round(v, 2) for k, v in fact.items()},
+            "forecast": forecast, "days_passed": days_passed, "days_total": days_total}
+
+
+@app.get("/api/v1/targets")
+def get_targets(month: str = "", x_telegram_username: str = Depends(current_username)):
+    month = month or _current_month()
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        return month_plan(conn, month, admin)
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/targets")
+def set_targets(payload: TargetsSet, x_telegram_username: str = Depends(current_username)):
+    _month_bounds(payload.month)
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        for metric in TARGET_METRICS:
+            if metric not in payload.targets:
+                continue
+            value = payload.targets[metric]
+            if value in (None, ""):
+                conn.execute("DELETE FROM finance_targets WHERE month=%s AND metric=%s", (payload.month, metric))
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Проверь числа в плане")
+            conn.execute("INSERT INTO finance_targets(month, metric, value) VALUES(%s,%s,%s) "
+                         "ON CONFLICT(month, metric) DO UPDATE SET value=excluded.value", (payload.month, metric, value))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/api/v1/pnl/ftd")
+def ftd_list(month: str = "", x_telegram_username: str = Depends(current_username)):
+    """Every FTD of the month with the CPA the CRM expects for it — to reconcile with the broker's payout."""
+    month = month or _current_month()
+    _month_bounds(month)
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        rules = finance_rules(conn)
+        rows = _lead_rows(leads, rules, _account_deposits_by_month(conn))
+    finally:
+        conn.close()
+    by_key = {x["lead_key"]: x for x in leads}
+    out = []
+    for r in rows:
+        if r["ftd_month"] != month:
+            continue
+        x = by_key.get(r["lead_key"], {})
+        accs = x.get("matched_accounts") or []
+        out.append({"name": x.get("name"), "tg_username": x.get("tg_username"), "email": x.get("email"),
+                    "accounts": [str(a.get("account_id")) for a in accs if a.get("account_id")],
+                    "country": r["country"], "tier": r["tier"], "geo": r["geo"],
+                    "ftd_day": lead_funnel_days(x)[2] if x else None,
+                    "deposits_month": round(r["deposits_by_month"].get(month, 0.0), 2), "cpa": r["cpa"]})
+    out.sort(key=lambda r: (r["ftd_day"] or "", r["name"] or ""))
+    return {"month": month, "rows": out, "total": round(sum(r["cpa"] for r in out), 2), "count": len(out)}
+
+
+@app.get("/api/v1/audit")
+def audit_list(limit: int = 200, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        rows = [dict(r) for r in conn.execute(
+            "SELECT at, actor, action FROM audit_log ORDER BY at DESC LIMIT %s", (max(1, min(int(limit), 1000)),)).fetchall()]
+    finally:
+        conn.close()
+    return {"rows": rows}
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.

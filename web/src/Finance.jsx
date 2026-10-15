@@ -18,7 +18,85 @@ const monthLabel = (m, short) => {
   return name[0].toUpperCase() + name.slice(1) + " " + (short ? m.slice(2, 4) : m.slice(0, 4));
 };
 
-function MonthPnl({ m }) {
+// Every FTD of the month with the CPA the CRM expects — to check the broker's payout line by line.
+function FtdList({ month, username, fact }) {
+  const [data, setData] = useState(null);
+  const [msg, setMsg] = useState("");
+  useEffect(() => { api(`/api/v1/pnl/ftd?month=${month}`, { username, timeout: 90000 }).then(setData).catch(e => setMsg(e.message)); }, [month, username]);
+  const text = data && ["Дата FTD\tКлиент\tСчёт\tСтрана\tТир\tДепы за месяц\tCPA",
+    ...data.rows.map(r => [r.ftd_day, r.name || r.tg_username || r.email || "", r.accounts.join(", "), r.country || "", r.tier, r.deposits_month, r.cpa].join("\t"))].join("\n");
+  async function copy() {
+    try { await navigator.clipboard.writeText(text); setMsg("Скопировано — вставь в таблицу или отправь менеджеру FxPro."); }
+    catch { setMsg("Скопировать не получилось."); }
+  }
+  if (!data) return <p className="recon-hint">{msg || "Загружаю FTD…"}</p>;
+  return (
+    <div className="ftd-list">
+      <div className="ftd-head">
+        <b>{data.count} FTD · ожидаемый CPA {money(data.total)}</b>
+        {fact != null && <span className={tone(fact - data.total)}>факт {money(fact)} · разница {money(fact - data.total)}</span>}
+        <button className="mini-btn" onClick={copy}>Скопировать для FxPro</button>
+      </div>
+      <div className="cohort-scroll"><table className="cohort-table">
+        <thead><tr><th>FTD</th><th>Клиент</th><th>Счёт</th><th>Страна</th><th>Деп за мес.</th><th>CPA</th></tr></thead>
+        <tbody>{data.rows.map((r, i) => <tr key={i}>
+          <th>{r.ftd_day ? r.ftd_day.slice(5) : "—"}</th><td>{r.name || (r.tg_username ? "@" + r.tg_username : r.email) || "—"}</td>
+          <td>{r.accounts.join(", ") || "—"}</td><td>{r.country || "—"} · {r.tier.replace("tier", "T")}</td>
+          <td>{money(r.deposits_month)}</td><td>{money(r.cpa)}</td></tr>)}</tbody>
+      </table></div>
+      {msg && <p className="recon-hint">{msg}</p>}
+    </div>
+  );
+}
+
+const PLAN = [["ftd", "FTD", false], ["cpa", "Доход CPA", true], ["profit", "Прибыль", true], ["traffic", "Бюджет трафика", true]];
+
+// Monthly plan vs fact with a forecast at the current pace. Traffic is a budget: under it is good.
+function Plan({ username }) {
+  const [month, setMonth] = useState(monthNow());
+  const [data, setData] = useState(null);
+  const [edit, setEdit] = useState(null);
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => api(`/api/v1/targets?month=${month}`, { username, timeout: 90000 }).then(setData).catch(e => setMsg(e.message)), [month, username]);
+  useEffect(() => { load(); }, [load]);
+  async function save() {
+    try {
+      await api("/api/v1/targets", { username, method: "POST", body: { month, targets: Object.fromEntries(PLAN.map(([k]) => [k, edit[k] === "" ? null : edit[k]])) } });
+      setEdit(null); setMsg(""); load();
+    } catch (e) { setMsg(e.message); }
+  }
+  if (!data) return msg ? <div className="team-message">{msg}</div> : null;
+  const show = (k, v) => k === "ftd" ? Math.round(v) : money(v);
+  const has = Object.keys(data.targets).length > 0;
+  return (
+    <div className="plan-box">
+      <div className="ftd-head">
+        <b>План на {monthLabel(month)}</b>
+        <span className="recon-hint">{data.days_passed} из {data.days_total} дн.</span>
+        <button className="mini-btn" onClick={() => setMonth(shiftMonth(month, -1))}>←</button>
+        <button className="mini-btn" disabled={month >= monthNow()} onClick={() => setMonth(shiftMonth(month, 1))}>→</button>
+        {!edit && <button className="mini-btn" onClick={() => setEdit(Object.fromEntries(PLAN.map(([k]) => [k, data.targets[k] ?? ""])))}>{has ? "Изменить" : "Задать план"}</button>}
+      </div>
+      {edit ? <div className="watch-settings">
+        <div className="pay-extra">{PLAN.map(([k, l, usd]) => <label key={k}>{l}{usd ? ", $" : ""}<input type="number" min="0" value={edit[k]} onChange={e => setEdit({ ...edit, [k]: e.target.value })} /></label>)}</div>
+        <div className="pay-actions"><button className="upload-btn" onClick={save}>Сохранить план</button><button className="link-btn" onClick={() => setEdit(null)}>Отмена</button></div>
+      </div> : has ? <div className="plan-rows">{PLAN.filter(([k]) => data.targets[k] != null).map(([k, l]) => {
+        const target = data.targets[k], fact = data.fact[k], fc = data.forecast[k];
+        const ratio = target ? fact / target : 0, fcRatio = target ? fc / target : 0;
+        const good = k === "traffic" ? fcRatio <= 1 : fcRatio >= 1;
+        return <div className="plan-row" key={k}>
+          <div className="plan-label"><b>{l}</b><span>{show(k, fact)} из {show(k, target)} · {Math.round(ratio * 100)}%</span></div>
+          <div className="plan-bar"><i style={{ width: Math.min(100, ratio * 100) + "%" }} className={good ? "ok" : "bad"} /><em style={{ left: Math.min(100, fcRatio * 100) + "%" }} /></div>
+          <small className={good ? "t-ftd" : "t-bad"}>прогноз {show(k, fc)} · {k === "traffic" ? (good ? "в бюджете" : "перерасход") : (good ? "план выполняется" : "не успеваем")}</small>
+        </div>;
+      })}</div> : <p className="recon-hint">План не задан. Задай цели на месяц — CRM покажет прогресс, прогноз по текущему темпу и пришлёт их в утренней сводке.</p>}
+      {msg && <div className="team-message">{msg}</div>}
+    </div>
+  );
+}
+
+function MonthPnl({ m, username }) {
+  const [open, setOpen] = useState(false);
   const lines = (obj) => Object.entries(obj).filter(([, v]) => v);
   return (
     <div className="buy-row">
@@ -39,6 +117,8 @@ function MonthPnl({ m }) {
         <div>{lines(m.expense).map(([k, v]) => <p key={k}><span>{k}{k === "Трафик" && m.traffic_auto ? " · из отчётов" : ""}{k === "ЗП" && m.payroll_auto ? " · с ЗП обработчиков" : ""}</span><b>{money(v)}</b></p>)}
           {!lines(m.expense).length && <p><span>Расходов нет</span></p>}</div>
       </div>
+      {m.ftd > 0 && <button className="link-btn" onClick={() => setOpen(!open)}>{open ? "Скрыть FTD" : `FTD для сверки с FxPro (${m.ftd})`}</button>}
+      {open && <FtdList month={m.month} username={username} fact={m.cpa_source === "fact" ? m.income.CPA : null} />}
     </div>
   );
 }
@@ -244,6 +324,7 @@ export default function Finance({ username }) {
       <div className="role-hero"><div><p className="eyebrow">P&L · КОГОРТЫ</p><h2>Прибыль проекта</h2>
         <p>CPA и IB минус трафик, ЗП и остальные расходы. Когорты по месяцу прихода лида.</p></div><span>📒</span></div>
       <Digest username={username} />
+      {!geo && <Plan username={username} />}
       <div className="period-switch">{PERIODS.map(([v, l]) => <button key={v} className={months === v ? "selected" : ""} onClick={() => setMonths(v)}>{l}</button>)}</div>
       {pnl?.geos?.length > 1 && <div className="period-switch filter-switch">
         {[["", "Все ГЕО"], ...pnl.geos.map(g => [g, g])].map(([v, l]) => <button key={v} className={geo === v ? "selected" : ""} onClick={() => setGeo(v)}>{l}</button>)}</div>}
@@ -257,7 +338,7 @@ export default function Finance({ username }) {
       </div>}
       <div className="st-tabs">{[["pnl", "По месяцам"], ["cohorts", "Когорты"], ["entries", "Внести"]].map(([k, l]) =>
         <button key={k} className={view === k ? "selected" : ""} onClick={() => setView(k)}>{l}</button>)}</div>
-      {view === "pnl" && pnl && <div className="st-list pnl-grid">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} />)}
+      {view === "pnl" && pnl && <div className="st-list pnl-grid">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} username={username} />)}
         <p className="recon-hint">CPA (расчёт) — по месяцу FTD, по сетке FxPro: тир страны × сумма депозитов клиента за месяц FTD. IB — лоты × ставка, вносится во вкладке «Внести». Трафик за день берётся по большему из двух источников: отчёты баеров или Ads Manager, чтобы не считать дважды.</p></div>}
       {view === "cohorts" && cohorts && <Cohorts data={cohorts} />}
       {view === "entries" && <Entries username={username} rules={pnl?.rules} countries={pnl?.countries} geos={pnl?.geos || []} onChanged={load} />}

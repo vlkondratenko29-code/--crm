@@ -197,6 +197,14 @@ function App() {
       await loadTeam();
     } catch (error) { setTeamMessage(error.message); }
   }
+  // Action log for the owner: who changed what (Команда tab).
+  const [audit, setAudit] = useState(null);
+  React.useEffect(() => {
+    if (tab !== "admin" || !effectiveUser.is_admin) return;
+    const base = import.meta.env.VITE_API_URL || "";
+    fetch(base + "/api/v1/audit?limit=150", { headers: authHeaders(effectiveUser.username) })
+      .then(r => r.ok ? r.json() : { rows: [] }).then(d => setAudit(d.rows)).catch(() => setAudit([]));
+  }, [tab, effectiveUser.username, team]);
   const siteAccessText = siteAccess?.password && `CRM: ${window.location.origin}
 Логин: ${siteAccess.username}
 Пароль: ${siteAccess.password}`;
@@ -441,6 +449,17 @@ function App() {
               </>}
             </div>}
           </React.Fragment>)}
+        </div>
+      </section>}
+      {tab === "admin" && effectiveUser.is_admin && <section className="card">
+        <p className="eyebrow">ЖУРНАЛ</p>
+        <h2>Кто что менял</h2>
+        <div className="audit-list">
+          {(audit || []).map((r, i) => <div className="audit-row" key={i}>
+            <span>{new Date(r.at + "Z").toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+            <b>@{r.actor}</b><span>{r.action}</span>
+          </div>)}
+          {audit && !audit.length && <p className="subtitle">Пока пусто. Сюда попадают изменения команды, паролей, настроек, ЗП и P&L.</p>}
         </div>
       </section>}
       {loading && tab === "clients" && !openLead && <section className="card"><p>Ищу…</p></section>}
