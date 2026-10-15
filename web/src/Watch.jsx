@@ -4,6 +4,55 @@ import { api } from "./api.js";
 // Operator watch: suspicious outgoing messages in Chatterfy (wallets, foreign links, @nicks, phones).
 const when = v => v ? new Date(v.endsWith("Z") ? v : v + "Z").toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
 
+// Full conversations of one operator from Chatterfy, as a text file to review how they talk and close.
+function DialogExport({ username }) {
+  const [ops, setOps] = useState(null);
+  const [op, setOp] = useState("");
+  const [days, setDays] = useState("14");
+  const [res, setRes] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  useEffect(() => { api("/api/v1/dialogs/operators", { username }).then(d => setOps(d.operators)).catch(e => setMsg(e.message)); }, [username]);
+  async function run() {
+    setBusy(true); setMsg("Собираю диалоги из Chatterfy… до пары минут."); setRes(null);
+    try {
+      const r = await api(`/api/v1/dialogs/export?operator_id=${encodeURIComponent(op)}&days=${days}&limit=30`, { username, timeout: 240000 });
+      setRes(r); setMsg(r.chats ? `Готово: ${r.chats} чатов.` : "Чатов этого оператора за период не нашлось.");
+    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  }
+  function download() {
+    const blob = new Blob([res.text], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `dialogs-${res.operator.replace(/[^\wа-яё-]+/gi, "_")}-${new Date().toISOString().slice(0, 10)}.txt`;
+    a.click(); URL.revokeObjectURL(a.href);
+  }
+  async function copy() {
+    try { await navigator.clipboard.writeText(res.text); setMsg("Скопировано."); } catch { setMsg("Скопировать не получилось — скачай файлом."); }
+  }
+  return (
+    <div className="watch-settings">
+      <div className="section-title">Диалоги оператора</div>
+      <p className="recon-hint">Вся переписка чатов, где оператор писал сам или назначен в Chatterfy: клиент, бот/AI и оператор по времени. Для разбора общения и договорённостей.</p>
+      <div className="pay-extra">
+        <label>Оператор<select value={op} onChange={e => setOp(e.target.value)}>
+          <option value="">— выбери —</option>
+          {(ops || []).map(o => <option key={o.id} value={o.id}>{o.name}{o.crm ? " · @" + o.crm : ""}</option>)}
+        </select></label>
+        <label>Период<select value={days} onChange={e => setDays(e.target.value)}>
+          <option value="7">7 дней</option><option value="14">14 дней</option><option value="30">30 дней</option><option value="60">60 дней</option>
+        </select></label>
+      </div>
+      <button className="upload-btn" disabled={busy || !op} onClick={run}>{busy ? "Собираю…" : "Выгрузить диалоги"}</button>
+      {msg && <div className="team-message">{msg}</div>}
+      {res?.chats > 0 && <div className="pay-actions">
+        <button className="upload-btn" onClick={download}>Скачать .txt</button>
+        <button className="mini-btn" onClick={copy}>Скопировать</button>
+      </div>}
+    </div>
+  );
+}
+
 export default function Watch({ username }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
@@ -88,6 +137,7 @@ export default function Watch({ username }) {
         </div>}
       </>}
       {!data && !error && <p className="subtitle">Загружаю…</p>}
+      {data?.configured && <DialogExport username={username} />}
     </section>
   );
 }

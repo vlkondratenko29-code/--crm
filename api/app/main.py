@@ -4188,6 +4188,149 @@ if os.getenv("DISABLE_WATCH_LOOP", "0") != "1":
     threading.Thread(target=_watch_loop, daemon=True).start()
 
 
+# ---------------------------------------------------------------------------
+# Dialog export: full conversations of one operator, to review how they talk and close
+# ---------------------------------------------------------------------------
+
+DIALOG_SCAN_CHATS = 300      # recent chats looked at when searching by message author
+DIALOG_SCAN_READS = 120      # message reads allowed for that search (keeps the request short)
+DIALOG_MESSAGES = 200        # messages per exported chat
+
+
+def _space_people(client):
+    """Chatterfy space users: id -> {name, email}."""
+    out = {}
+    for u in client.space_users(CHATTERFY_SPACE_ID):
+        full = " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x).strip()
+        out[u.get("id")] = {"name": full or u.get("email") or u.get("id"), "email": (u.get("email") or "").lower()}
+    return out
+
+
+@app.get("/api/v1/dialogs/operators")
+def dialog_operators(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        key = watch_key(conn)
+        if not key:
+            raise HTTPException(status_code=400, detail="Нет ключа Chatterfy: укажи его во вкладке «Контроль»")
+        crm = {(r["chatterfy_email"] or "").lower(): r["username"] for r in conn.execute(
+            "SELECT username, chatterfy_email FROM crm_users WHERE chatterfy_email IS NOT NULL").fetchall()}
+    finally:
+        conn.close()
+    try:
+        people = _space_people(watch_lib.Chatterfy(key))
+    except watch_lib.ChatterfyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    rows = [{"id": i, "name": p["name"], "email": p["email"], "crm": crm.get(p["email"])} for i, p in people.items()]
+    return {"operators": sorted(rows, key=lambda r: r["name"].lower())}
+
+
+def _fmt_ts(value):
+    t = _ts(value)
+    return (t + timedelta(hours=STATS_TZ_HOURS)).strftime("%d.%m %H:%M") if t else "??"
+
+
+@app.get("/api/v1/dialogs/export")
+def dialog_export(operator_id: str, days: int = 14, limit: int = 25, x_telegram_username: str = Depends(current_username)):
+    """Text of the operator's chats for the last `days`: every message with who wrote it
+    (client / bot or AI / operator name). Chats are found by the CRM assignment and by the
+    operator's own messages in recent chats."""
+    days, limit = max(1, min(int(days), 60)), max(1, min(int(limit), 60))
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        key = watch_key(conn)
+        if not key:
+            raise HTTPException(status_code=400, detail="Нет ключа Chatterfy: укажи его во вкладке «Контроль»")
+        client = watch_lib.Chatterfy(key)
+        try:
+            people = _space_people(client)
+        except watch_lib.ChatterfyError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        if operator_id not in people:
+            raise HTTPException(status_code=404, detail="Нет такого оператора в Chatterfy")
+        op = people[operator_id]
+        crm_user = conn.execute("SELECT username FROM crm_users WHERE lower(chatterfy_email)=%s", (op["email"],)).fetchone()
+        assignees = {op["email"]} | ({crm_user["username"].lower()} if crm_user else set())
+        # 1) chats the CRM has assigned to this operator (from Chatterfy's operator webhook)
+        assigned = set()
+        for r in conn.execute("SELECT lead_key, assignee FROM lead_work WHERE assignee IS NOT NULL").fetchall():
+            if (r["assignee"] or "").lower() in assignees:
+                k = r["lead_key"]
+                if k.startswith("chat:"):
+                    assigned.add(k[5:])
+                else:
+                    assigned |= {x["chat_id"] for x in conn.execute(
+                        "SELECT chat_id FROM chatterfy_leads WHERE lower(email)=%s", (k,)).fetchall()}
+    finally:
+        conn.close()
+
+    since = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    chats, meta, messages = [], {}, {}
+    try:
+        for offset in range(0, DIALOG_SCAN_CHATS, 100):
+            page = client.chats(CHATTERFY_BOT_ID, 100, offset)
+            chats.extend(page)
+            if len(page) < 100:
+                break
+        recent = [c for c in chats if ((c.get("last_message") or {}).get("created_at") or "") >= since]
+        meta = {str(c["id"]): c for c in chats}
+        # 2) chats where this operator wrote himself
+        recent_ids = {str(c["id"]) for c in recent}
+        found, reads = [], 0
+        for cid in (str(x) for x in assigned):
+            if len(found) >= limit:
+                break
+            if cid in meta:
+                if cid in recent_ids:
+                    found.append(cid)
+                continue
+            items = client.messages(cid, DIALOG_MESSAGES)  # older chat outside the scanned page: check its dates
+            reads += 1
+            if items and max((m.get("created_at") or "") for m in items) >= since:
+                messages[cid] = items
+                found.append(cid)
+        for c in recent:
+            if len(found) >= limit or reads >= DIALOG_SCAN_READS:
+                break
+            cid = str(c["id"])
+            if cid in found:
+                continue
+            items = client.messages(c["id"], DIALOG_MESSAGES)
+            reads += 1
+            messages[cid] = items
+            if any(m.get("sender") == operator_id for m in items):
+                found.append(cid)
+        found = found[:limit]
+        for cid in found:
+            if cid not in messages:
+                messages[cid] = client.messages(cid, DIALOG_MESSAGES)
+    except watch_lib.ChatterfyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    names = {i: p["name"] for i, p in people.items()}
+    blocks = []
+    for cid in found:
+        c = meta.get(cid, {})
+        items = sorted(messages.get(cid) or [], key=lambda m: m.get("created_at") or "")
+        lines = [f"=== Чат: {c.get('name') or 'Клиент'} · начат {_fmt_ts(c.get('created_at'))} · {_chat_link(cid)}"]
+        for m in items:
+            if m.get("sender_type") != "outcoming":
+                who = "Клиент"
+            elif m.get("sender"):
+                who = ("Оператор " if m.get("sender") == operator_id else "Другой оператор ") + names.get(m.get("sender"), "?")
+            else:
+                who = "Бот/AI"
+            text = (m.get("content") or "").strip() or "[вложение/медиа]"
+            lines.append(f"[{_fmt_ts(m.get('created_at'))}] {who}: {text}")
+        blocks.append("\n".join(lines))
+    head = (f"Диалоги оператора {op['name']} ({op['email']}) за {days} дн. · чатов: {len(found)} "
+            f"· выгружено {(datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).strftime('%d.%m.%Y %H:%M')}")
+    return {"operator": op["name"], "chats": len(found), "scanned": len(recent) if chats else 0,
+            "text": head + "\n\n" + "\n\n".join(blocks)}
+
+
 class WatchSettings(BaseModel):
     api_key: str | None = None
     allowed: str | None = None
