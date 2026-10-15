@@ -172,20 +172,23 @@ function App() {
   }
 
   // Website access: the CRM generates the password, it is shown here once and never stored in the open.
-  const [siteAccess, setSiteAccess] = useState(null);
+  const [siteAccess, setSiteAccess] = useState(null);  // { username, password?, error?, copied? } shown under that member's row
+  // Inside Telegram the browser's confirm() is often not shown at all, so Telegram's own dialog is used.
+  const confirmAction = (text) => tg?.showConfirm ? new Promise(resolve => tg.showConfirm(text, resolve)) : Promise.resolve(window.confirm(text));
   async function generateSitePassword(member) {
-    if (member.has_password && !window.confirm(`Выдать @${member.username} новый пароль? Старый сразу перестанет работать.`)) return;
+    if (member.has_password && !(await confirmAction(`Выдать @${member.username} новый пароль? Старый сразу перестанет работать.`))) return;
+    setSiteAccess({ username: member.username, busy: true });
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const res = await fetch(`${base}/api/v1/users/${encodeURIComponent(member.username)}/password`, { method: "POST", headers: authHeaders(effectiveUser.username) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.detail || "HTTP " + res.status);
-      setSiteAccess({ username: data.username, password: data.password, copied: false });
+      setSiteAccess({ username: member.username, password: data.password, copied: false });
       await loadTeam();
-    } catch (error) { setTeamMessage(error.message); }
+    } catch (error) { setSiteAccess({ username: member.username, error: "Не получилось выдать пароль: " + error.message }); }
   }
   async function revokeSitePassword(member) {
-    if (!window.confirm(`Закрыть @${member.username} вход на сайт? В мини-аппе доступ останется.`)) return;
+    if (!(await confirmAction(`Закрыть @${member.username} вход на сайт? В мини-аппе доступ останется.`))) return;
     try {
       const base = import.meta.env.VITE_API_URL || "";
       const res = await fetch(`${base}/api/v1/users/${encodeURIComponent(member.username)}/password`, { method: "DELETE", headers: authHeaders(effectiveUser.username) });
@@ -194,12 +197,12 @@ function App() {
       await loadTeam();
     } catch (error) { setTeamMessage(error.message); }
   }
-  const siteAccessText = siteAccess && `CRM: ${window.location.origin}
+  const siteAccessText = siteAccess?.password && `CRM: ${window.location.origin}
 Логин: ${siteAccess.username}
 Пароль: ${siteAccess.password}`;
   async function copySiteAccess() {
     try { await navigator.clipboard.writeText(siteAccessText); setSiteAccess({ ...siteAccess, copied: true }); }
-    catch { setTeamMessage("Не получилось скопировать — выдели текст вручную."); }
+    catch { setSiteAccess({ ...siteAccess, copyFailed: true }); }
   }
 
   async function disableTeamUser(username) {
@@ -420,17 +423,24 @@ function App() {
           <button className="primary" type="button" onClick={saveTeamUser} disabled={savingUser}>{savingUser ? "Добавляю…" : "Добавить"}</button>
         </div>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
-        {siteAccess && <div className="site-access">
-          <b>Данные для входа на сайт — показываются один раз</b>
-          <pre>{siteAccessText}</pre>
-          <div className="pay-actions">
-            <button className="primary" type="button" onClick={copySiteAccess}>{siteAccess.copied ? "Скопировано ✓" : "Скопировать"}</button>
-            <button className="link-btn" type="button" onClick={() => setSiteAccess(null)}>Готово, я сохранил</button>
-          </div>
-          <small>Отправь человеку лично. После закрытия пароль больше нигде не увидеть: потерял — выдай новый.</small>
-        </div>}
         <div className="team-list">
-          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.owner ? " · владелец" : ""}{member.has_password ? " · вход на сайт" : ""}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.active ? <button onClick={() => generateSitePassword(member)}>{member.has_password ? "Новый пароль" : "Пароль для сайта"}</button> : null}{member.has_password ? <button onClick={() => revokeSitePassword(member)}>Закрыть сайт</button> : null}{!member.owner ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
+          {team.map((member) => <React.Fragment key={member.username}>
+            <div className="team-row"><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.owner ? " · владелец" : ""}{member.has_password ? " · вход на сайт" : ""}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.active ? <button onClick={() => generateSitePassword(member)}>{member.has_password ? "Новый пароль" : "Пароль для сайта"}</button> : null}{member.has_password ? <button onClick={() => revokeSitePassword(member)}>Закрыть сайт</button> : null}{!member.owner ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>
+            {siteAccess?.username === member.username && <div className="site-access">
+              {siteAccess.busy && <b>Генерирую пароль…</b>}
+              {siteAccess.error && <b className="t-bad">{siteAccess.error}</b>}
+              {siteAccess.password && <>
+                <b>Данные для входа на сайт — показываются один раз</b>
+                <pre>{siteAccessText}</pre>
+                <div className="pay-actions">
+                  <button className="primary" type="button" onClick={copySiteAccess}>{siteAccess.copied ? "Скопировано ✓" : "Скопировать"}</button>
+                  <button className="link-btn" type="button" onClick={() => setSiteAccess(null)}>Готово, я сохранил</button>
+                </div>
+                {siteAccess.copyFailed && <small className="t-bad">Скопировать не получилось — выдели текст выше вручную.</small>}
+                <small>Отправь человеку лично. После закрытия пароль больше нигде не увидеть: потерял — выдай новый.</small>
+              </>}
+            </div>}
+          </React.Fragment>)}
         </div>
       </section>}
       {loading && tab === "clients" && !openLead && <section className="card"><p>Ищу…</p></section>}
