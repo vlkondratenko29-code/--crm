@@ -64,6 +64,7 @@ export default function Buying({ username, days }) {
         <div><span>Ответили боту</span><b>{pct(t.dialog_rate)}</b></div>
         <div><span>Цена реги</span><b className="t-reg">{cur(t.cp_reg, c)}</b></div>
         <div><span>Цена депа</span><b className="t-ftd">{cur(t.cp_ftd, c)}</b></div>
+        <div><span>Доход CPA</span><b className="t-ftd">{cur(t.cpa, "USD")}</b></div>
         <div><span>ROI</span><b className={t.roi == null ? "" : t.roi >= 0 ? "t-ftd" : "t-bad"}>{pct(t.roi)}</b></div>
       </div>}
 
@@ -87,12 +88,13 @@ export default function Buying({ username, days }) {
             <Cell label="цена реги" value={cur(r.cp_reg, c)} tone="t-reg" />
             <Cell label="депы" value={r.ftd} tone="t-ftd" />
             <Cell label="цена депа" value={cur(r.cp_ftd, c)} tone="t-ftd" />
+            <Cell label="доход CPA" value={cur(r.cpa, "USD")} tone="t-ftd" />
             <Cell label="сумма депов" value={cur(r.deposits, "USD")} />
             <Cell label="ROI" value={pct(r.roi)} tone={r.roi == null ? "" : r.roi >= 0 ? "t-ftd" : "t-bad"} />
           </div>
         </div>)}
         {!data.rows.length && <div className="empty-state">Нет данных за период. Загрузи расход из Ads Manager.</div>}
-        <p className="recon-hint">«Мало данных» — меньше {data.min_leads} лидов: по такой выборке рано отключать или масштабировать. «Ответили боту» — человек ответил на приветствие или дошёл до реги. Реги и депы подтягиваются из отчёта FxPro — загружай его в «Сверку» каждый день.</p>
+        <p className="recon-hint">«Мало данных» — меньше {data.min_leads} лидов: по такой выборке рано отключать или масштабировать. «Ответили боту» — человек ответил на приветствие или дошёл до реги. Реги и депы подтягиваются из отчёта FxPro — загружай его в «Сверку» каждый день. ROI = (доход CPA − расход) / расход: доход — сколько брокер платит за FTD по сетке CPA, а не сумма депов клиентов.</p>
       </div>}
     </div>
   );

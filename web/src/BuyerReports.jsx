@@ -20,6 +20,7 @@ function Nums({ r }) {
       <span className="t-reg">{r.reg}<small>реги</small></span>
       <span className="t-ftd">{r.ftd}<small>депы</small></span>
       <span>{money(r.cp_ftd)}<small>цена депа</small></span>
+      <span className="t-ftd">{money(r.cpa)}<small>доход CPA</small></span>
       <span>{money(r.deposits)}<small>сумма депов</small></span>
       <span className={roiTone(r.roi)}>{pct(r.roi)}<small>ROI</small></span>
     </div>
@@ -68,14 +69,14 @@ export default function BuyerReports({ username }) {
     <section className="role-dashboard stats-screen">
       <div className="role-hero"><div><p className="eyebrow">ОТЧЁТЫ БАИНГА</p>
         <h2>{manager ? "Отчётность баинга" : "Мои отчёты"}</h2>
-        <p>Баер вносит расход по кампаниям за день, CRM добавляет лиды, реги, депы и ROI по этим кампаниям.</p></div><span>📊</span></div>
+        <p>Баер вносит расход по кампаниям за день, CRM добавляет лиды, реги, депы и ROI по этим кампаниям. ROI считается по доходу CPA (сетка FxPro), а не по сумме депов клиентов.</p></div><span>📊</span></div>
       <div className="period-switch">{PERIODS.map(([v, l]) => <button key={v} className={days === v ? "selected" : ""} onClick={() => setDays(v)}>{l}</button>)}</div>
       {error && <div className="team-message">{error}</div>}
       {t && <div className="st-kpis">
         <div><span>Расход</span><b className="t-money">{money(t.spend)}</b><small>по отчётам</small></div>
         <div><span>Лиды</span><b>{t.leads}</b><small>цена {money(t.cpl)}</small></div>
         <div><span>Депы</span><b className="t-ftd">{t.ftd}</b><small>цена {money(t.cp_ftd)}</small></div>
-        <div><span>ROI</span><b className={roiTone(t.roi)}>{pct(t.roi)}</b><small>депы {money(t.deposits)}</small></div>
+        <div><span>ROI</span><b className={roiTone(t.roi)}>{pct(t.roi)}</b><small>доход CPA {money(t.cpa)}</small></div>
       </div>}
 
       <div className="st-tabs">{tabs.map(([k, l]) => <button key={k} className={view === k ? "selected" : ""} onClick={() => setView(k)}>{l}</button>)}</div>

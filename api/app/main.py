@@ -3550,6 +3550,7 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
         since = data_since(conn)
         spend_rows = [dict(r) for r in conn.execute("SELECT * FROM ad_spend").fetchall()]
         last_upload = conn.execute("SELECT MAX(uploaded_at) AS at FROM ad_spend").fetchone()
+        cpa_of = lead_cpa(conn, leads)
     finally:
         conn.close()
 
@@ -3565,7 +3566,7 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
 
     def g(key, label):
         return groups.setdefault(key, {"label": label, "spend": 0.0, "impressions": 0.0, "clicks": 0.0,
-                                       "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0})
+                                       "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0, "cpa": 0.0})
 
     currencies = set()
     for r in spend_rows:
@@ -3598,11 +3599,12 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
         if in_period(ftd_day):
             b["ftd"] += 1
             b["deposits"] += sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
+            b["cpa"] += cpa_of.get(x["lead_key"], 0.0)
 
     def per(a, b):
         return round(a / b, 2) if b else None
 
-    rows, total = [], {"spend": 0.0, "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0, "clicks": 0.0}
+    rows, total = [], {"spend": 0.0, "leads": 0, "dialogs": 0, "reg": 0, "ftd": 0, "deposits": 0.0, "cpa": 0.0, "clicks": 0.0}
     for b in groups.values():
         if not (b["spend"] or b["leads"] or b["reg"] or b["ftd"]):
             continue
@@ -3613,11 +3615,12 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
             "ad": b["label"][2] if len(b["label"]) > 2 else None,
             "spend": round(b["spend"], 2), "clicks": int(b["clicks"]), "leads": b["leads"], "dialogs": b["dialogs"],
             "reg": b["reg"], "ftd": b["ftd"], "deposits": round(b["deposits"], 2),
+            "cpa": round(b["cpa"], 2), "profit": round(b["cpa"] - b["spend"], 2),
             "cpl": per(b["spend"], b["leads"]), "cp_reg": per(b["spend"], b["reg"]), "cp_ftd": per(b["spend"], b["ftd"]),
             "click_to_lead": round(b["leads"] / b["clicks"] * 100, 1) if b["clicks"] else None,
             "dialog_rate": round(b["dialogs"] / b["leads"] * 100, 1) if b["leads"] else None,
             "reg_rate": round(b["reg"] / b["leads"] * 100, 1) if b["leads"] else None,
-            "roi": round((b["deposits"] - b["spend"]) / b["spend"] * 100, 1) if b["spend"] else None,
+            "roi": round((b["cpa"] - b["spend"]) / b["spend"] * 100, 1) if b["spend"] else None,
             "low_data": b["leads"] < MIN_LEADS_FOR_DECISION,
         })
     rows.sort(key=lambda r: (-r["spend"], -r["leads"]))
@@ -3630,7 +3633,8 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
         "total": {**{k: (round(v, 2) if isinstance(v, float) else v) for k, v in t.items()},
                   "cpl": per(t["spend"], t["leads"]), "cp_reg": per(t["spend"], t["reg"]), "cp_ftd": per(t["spend"], t["ftd"]),
                   "dialog_rate": round(t["dialogs"] / t["leads"] * 100, 1) if t["leads"] else None,
-                  "roi": round((t["deposits"] - t["spend"]) / t["spend"] * 100, 1) if t["spend"] else None},
+                  "profit": round(t["cpa"] - t["spend"], 2),
+                  "roi": round((t["cpa"] - t["spend"]) / t["spend"] * 100, 1) if t["spend"] else None},
         "rows": rows[:100],
     }
 
@@ -4385,6 +4389,7 @@ def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_user
         leads = build_leads(conn, {"role": "admin", "username": "system"})
         ads = conn.execute("SELECT day, SUM(spend) AS spend FROM ad_spend GROUP BY day").fetchall()
         since = data_since(conn)
+        cpa_of = lead_cpa(conn, leads)
     finally:
         conn.close()
 
@@ -4398,22 +4403,23 @@ def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_user
     ads_by_day = {r["day"]: float(r["spend"] or 0) for r in ads}
 
     def bucket():
-        return {"spend": 0.0, "leads": 0, "reg": 0, "ftd": 0, "deposits": 0.0}
+        return {"spend": 0.0, "leads": 0, "reg": 0, "ftd": 0, "deposits": 0.0, "cpa": 0.0}
 
     def finish(b):
         sp = b["spend"]
         return {**{k: round(v, 2) if isinstance(v, float) else v for k, v in b.items()},
                 "cpl": round(sp / b["leads"], 2) if b["leads"] else None,
                 "cp_ftd": round(sp / b["ftd"], 2) if b["ftd"] else None,
-                "roi": round((b["deposits"] - sp) / sp * 100, 1) if sp else None}
+                "profit": round(b["cpa"] - sp, 2),
+                "roi": round((b["cpa"] - sp) / sp * 100, 1) if sp else None}
 
-    funnel = []  # (campaign key, lead day, reg day, ftd day, deposit)
+    funnel = []  # (campaign key, lead day, reg day, ftd day, deposit, CPA)
     for x in leads:
         lead_day, reg_day, ftd_day, dep = lead_funnel_days(x)
-        funnel.append((_key(x.get("campaign") or "Без кампании"), lead_day, reg_day, ftd_day, dep))
+        funnel.append((_key(x.get("campaign") or "Без кампании"), lead_day, reg_day, ftd_day, dep, cpa_of.get(x["lead_key"], 0.0)))
 
     def add_funnel(b, keys, day_ok):
-        for ck, lead_day, reg_day, ftd_day, dep in funnel:
+        for ck, lead_day, reg_day, ftd_day, dep, cpa in funnel:
             if keys is not None and ck not in keys:
                 continue
             b["leads"] += int(day_ok(lead_day))
@@ -4421,6 +4427,7 @@ def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_user
             if day_ok(ftd_day):
                 b["ftd"] += 1
                 b["deposits"] += dep
+                b["cpa"] += cpa
 
     by_buyer = {}
     for r in period:
@@ -4731,10 +4738,16 @@ def _lead_rows(leads, rules, account_money):
                     by_month[month] = by_month.get(month, 0.0) + amount
             if not any(by_month.values()) and dep:  # no broker snapshots: the known deposit belongs to the FTD month
                 by_month = {ftd_month: dep}
-        out.append({"lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day), "geo": x["geo"],
+        out.append({"lead_key": x["lead_key"], "lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day), "geo": x["geo"],
                     "ftd_month": ftd_month, "country": country, "deposits_by_month": by_month,
                     "cpa": cpa_payout(by_month.get(ftd_month, 0.0), country, rules) if ftd_month else 0.0})
     return out
+
+
+def lead_cpa(conn, leads):
+    """lead_key -> CPA the broker pays for that client (FxPro grid), the project's real revenue per FTD."""
+    rows = _lead_rows(leads, finance_rules(conn), _account_deposits_by_month(conn))
+    return {r["lead_key"]: r["cpa"] for r in rows if r["cpa"]}
 
 
 @app.get("/api/v1/pnl")
