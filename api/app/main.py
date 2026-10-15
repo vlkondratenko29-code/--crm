@@ -3694,6 +3694,20 @@ def facebook_sync_now(days: int = FB_SYNC_DAYS, x_telegram_username: str = Depen
 
 
 MIN_LEADS_FOR_DECISION = 30
+SCALE_MIN_FTD = 3      # enough deposits to trust a good ROI
+SCALE_MIN_ROI = 50     # % on CPA income
+
+
+def buying_verdict(b):
+    """«stop» / «scale» / None with the reason, by spend vs CPA income on enough data."""
+    spend, cpa, leads, ftd = b["spend"], b["cpa"], b["leads"], b["ftd"]
+    if leads >= MIN_LEADS_FOR_DECISION and ftd == 0 and spend:
+        return "stop", f"{leads} лидов без депа"
+    if ftd >= 2 and leads >= MIN_LEADS_FOR_DECISION and spend > cpa:
+        return "stop", f"трафик {spend:.0f}$ дороже дохода CPA {cpa:.0f}$"
+    if ftd >= SCALE_MIN_FTD and spend and (cpa - spend) / spend * 100 >= SCALE_MIN_ROI:
+        return "scale", f"ROI {(cpa - spend) / spend * 100:.0f}% на {ftd} FTD"
+    return None, None
 
 
 def _key(text):
@@ -3786,6 +3800,7 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
             "reg_rate": round(b["reg"] / b["leads"] * 100, 1) if b["leads"] else None,
             "roi": round((b["cpa"] - b["spend"]) / b["spend"] * 100, 1) if b["spend"] else None,
             "low_data": b["leads"] < MIN_LEADS_FOR_DECISION,
+            **dict(zip(("verdict", "verdict_reason"), buying_verdict(b))),
         })
     rows.sort(key=lambda r: (-r["spend"], -r["leads"]))
     t = total
@@ -4554,6 +4569,7 @@ def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_user
         ads = conn.execute("SELECT day, SUM(spend) AS spend FROM ad_spend GROUP BY day").fetchall()
         since = data_since(conn)
         cpa_of = lead_cpa(conn, leads)
+        account_price = float(finance_rules(conn).get("account_price") or 0)
     finally:
         conn.close()
 
@@ -4605,7 +4621,12 @@ def buyer_reports(days: int = 7, x_telegram_username: str = Depends(current_user
     for name, b in by_buyer.items():
         keys = b.pop("campaigns")
         add_funnel(b, keys, in_period)
-        buyers.append({"buyer": name, "campaigns": len(keys), **finish(b)})
+        row = {"buyer": name, "campaigns": len(keys), **finish(b)}
+        if account_price:  # banned accounts are part of what the buyer's traffic cost
+            cost = b["spend"] + b["bans"] * account_price
+            row.update({"accounts_cost": round(b["bans"] * account_price, 2), "profit": round(b["cpa"] - cost, 2),
+                        "roi": round((b["cpa"] - cost) / cost * 100, 1) if cost else None})
+        buyers.append(row)
     buyers.sort(key=lambda b: -b["spend"])
 
     span = min(days, 31) if days and days > 0 else 14
@@ -4787,6 +4808,7 @@ FINANCE_DEFAULT_RULES = {
     "country_tiers": {"turkey": "tier1", "türkiye": "tier1", "turkiye": "tier1", "tr": "tier1"},
     "default_tier": "tier3",  # countries not listed: the lowest payout, so the estimate is never too high
     "ib_per_lot": 16,         # $ IB pays per traded lot
+    "account_price": 0,       # $ per ad account; bans from buyer reports x price = account costs (0 = off)
 }
 FINANCE_CATEGORIES = {
     "income": ("CPA", "IB", "Другое"),
@@ -4849,6 +4871,15 @@ def _finance_months(conn, months):
     if since and since > first:
         first = min(since, now)
     return [_shift_month(first, i) for i in range(_months_between(first, now) + 1)]
+
+
+def _bans_by_month(conn, geo=None, campaign_geos=None):
+    out = {}
+    for r in conn.execute("SELECT day, campaign, SUM(bans) AS bans FROM buyer_reports GROUP BY day, campaign").fetchall():
+        if geo and (campaign_geos or {}).get(_key(r["campaign"])) != geo:
+            continue
+        out[r["day"][:7]] = out.get(r["day"][:7], 0) + int(r["bans"] or 0)
+    return out
 
 
 def _campaign_geos(leads):
@@ -4940,6 +4971,7 @@ def profit_and_loss(months: int = 6, geo: str = "", x_telegram_username: str = D
         rules = finance_rules(conn)
         leads = build_leads(conn, {"role": "admin", "username": "system"})
         traffic = _traffic_by_month(conn, geo, _campaign_geos(leads))
+        bans = _bans_by_month(conn, geo, _campaign_geos(leads))
         entries = [dict(r) for r in conn.execute(
             "SELECT month, kind, category, amount, geo FROM finance_entries WHERE month>=%s AND month<=%s",
             (month_list[0], month_list[-1])).fetchall()]
@@ -4969,6 +5001,8 @@ def profit_and_loss(months: int = 6, geo: str = "", x_telegram_username: str = D
         expense = {c: manual.get(("expense", c), 0.0) for c in FINANCE_CATEGORIES["expense"]}
         expense["Трафик"] += traffic.get(m, 0.0)
         expense["ЗП"] += payroll[m]
+        accounts_auto = bans.get(m, 0) * float(rules.get("account_price") or 0)
+        expense["Аккаунты"] += accounts_auto
         inc, exp = sum(income.values()), sum(expense.values())
         out.append({
             "month": m, "leads": sum(1 for r in rows if r["lead_month"] == m), "ftd": ftd,
@@ -4976,6 +5010,7 @@ def profit_and_loss(months: int = 6, geo: str = "", x_telegram_username: str = D
             "cpa_source": "fact" if cpa_fact else "calc", "cpa_calc": round(cpa_calc, 2),
             "expense": {k: round(v, 2) for k, v in expense.items()}, "expense_total": round(exp, 2),
             "traffic_auto": round(traffic.get(m, 0.0), 2), "payroll_auto": payroll[m],
+            "bans": bans.get(m, 0), "accounts_auto": round(accounts_auto, 2),
             "profit": round(inc - exp, 2),
             "margin": round((inc - exp) / inc * 100, 1) if inc else None,
             "roi": round((inc - exp) / exp * 100, 1) if exp else None,
@@ -5146,6 +5181,8 @@ def save_finance_rules(payload: dict, x_telegram_username: str = Depends(current
         admin = require_admin(x_telegram_username, conn)
         rules = finance_rules(conn)
         try:
+            if "account_price" in payload:
+                rules["account_price"] = max(0.0, float(payload["account_price"]))
             if "ib_per_lot" in payload:
                 rules["ib_per_lot"] = max(0.0, float(payload["ib_per_lot"]))
             if "cpa_brackets" in payload:

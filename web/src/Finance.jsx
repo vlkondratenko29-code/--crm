@@ -114,7 +114,7 @@ function MonthPnl({ m, username }) {
       <div className="pnl-lines">
         <div>{lines(m.income).map(([k, v]) => <p key={k}><span>{k}{k === "CPA" ? (m.cpa_source === "fact" ? " · факт" : " · расчёт") : ""}</span><b>{money(v)}</b></p>)}
           {!lines(m.income).length && <p><span>Доходов нет</span></p>}</div>
-        <div>{lines(m.expense).map(([k, v]) => <p key={k}><span>{k}{k === "Трафик" && m.traffic_auto ? " · из отчётов" : ""}{k === "ЗП" && m.payroll_auto ? " · с ЗП обработчиков" : ""}</span><b>{money(v)}</b></p>)}
+        <div>{lines(m.expense).map(([k, v]) => <p key={k}><span>{k}{k === "Трафик" && m.traffic_auto ? " · из отчётов" : ""}{k === "ЗП" && m.payroll_auto ? " · с ЗП обработчиков" : ""}{k === "Аккаунты" && m.accounts_auto ? ` · ${m.bans} банов` : ""}</span><b>{money(v)}</b></p>)}
           {!lines(m.expense).length && <p><span>Расходов нет</span></p>}</div>
       </div>
       {m.ftd > 0 && <button className="link-btn" onClick={() => setOpen(!open)}>{open ? "Скрыть FTD" : `FTD для сверки с FxPro (${m.ftd})`}</button>}
@@ -176,7 +176,7 @@ function CpaRules({ username, rules, countries, onChanged }) {
     setMsg("");
     try {
       await api("/api/v1/settings/finance", { username, method: "POST", body: {
-        country_tiers: v.country_tiers, default_tier: v.default_tier, ib_per_lot: Number(v.ib_per_lot) || 0 } });
+        country_tiers: v.country_tiers, default_tier: v.default_tier, ib_per_lot: Number(v.ib_per_lot) || 0, account_price: Number(v.account_price) || 0 } });
       setMsg("Условия сохранены."); onChanged();
     } catch (e) { setMsg(e.message); }
   }
@@ -201,6 +201,10 @@ function CpaRules({ username, rules, countries, onChanged }) {
         <label>Остальные страны<select value={v.default_tier} onChange={e => setV({ ...v, default_tier: e.target.value })}>
           {TIERS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></label>
         <label>IB за лот, $<input type="number" min="0" value={v.ib_per_lot} onChange={e => setV({ ...v, ib_per_lot: e.target.value })} /></label>
+      </div>
+      <div className="pay-extra">
+        <label>Цена аккаунта, $<input type="number" min="0" value={v.account_price ?? 0} onChange={e => setV({ ...v, account_price: e.target.value })} /></label>
+        <span className="recon-hint">Баны из отчётов баеров × цена идут в расход «Аккаунты» и в ROI баеров. 0 — не считать (если вносишь аккаунты вручную).</span>
       </div>
       <button className="upload-btn" onClick={save}>Сохранить условия</button>
       <p className="recon-hint">CPA клиента = ячейка сетки по тиру его страны (из отчёта FxPro) и сумме всех его депозитов за календарный месяц FTD (FTD + передепы того же месяца). Турция уже стоит в Tier 1.</p>

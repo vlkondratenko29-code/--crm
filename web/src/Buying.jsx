@@ -92,6 +92,11 @@ export default function Buying({ username, days }) {
         <div><span>ROI</span><b className={t.roi == null ? "" : t.roi >= 0 ? "t-ftd" : "t-bad"}>{pct(t.roi)}</b></div>
       </div>}
 
+      {data && data.rows.some(r => r.verdict) && <div className="verdict-sum">
+        <span className="verdict-stop">⛔ Стоп: {data.rows.filter(r => r.verdict === "stop").length}</span>
+        <span className="verdict-scale">🚀 Масштабировать: {data.rows.filter(r => r.verdict === "scale").length}</span>
+        <small>Стоп — {data.min_leads}+ лидов без депа или трафик дороже дохода CPA. Масштабировать — ROI от 50% на 3+ FTD.</small>
+      </div>}
       <div className="st-tabs">{LEVELS.map(([k, l]) => <button key={k} className={level === k ? "selected" : ""} onClick={() => setLevel(k)}>{l}</button>)}</div>
       {!data && !error && <p className="subtitle">Считаю…</p>}
       {data && <div className="st-list">
@@ -101,7 +106,8 @@ export default function Buying({ username, days }) {
               <b>{level === "campaign" ? r.campaign : level === "adset" ? (r.adset || "Без группы") : (r.ad || "Без объявления")}</b>
               {level !== "campaign" && <small>{r.campaign}{level === "ad" && r.adset ? " · " + r.adset : ""}</small>}
             </div>
-            {r.low_data ? <span className="buy-flag">мало данных</span> : null}
+            {r.verdict ? <span className={"buy-flag verdict-" + r.verdict} title={r.verdict_reason}>{r.verdict === "stop" ? "⛔ стоп" : "🚀 масштабировать"} · {r.verdict_reason}</span>
+              : r.low_data ? <span className="buy-flag">мало данных</span> : null}
           </div>
           <div className="buy-grid">
             <Cell label="расход" value={cur(r.spend, c)} tone="t-money" />

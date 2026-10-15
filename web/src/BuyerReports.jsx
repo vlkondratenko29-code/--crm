@@ -120,7 +120,7 @@ export default function BuyerReports({ username }) {
 
       {view === "buyers" && data && <div className="st-list">
         {data.by_buyer.map(b => <div className="buy-row" key={b.buyer}>
-          <div className="buy-head"><div><b>{who(b.buyer)}</b><small>кампаний {b.campaigns} · акков {b.accounts} · банов {b.bans}</small></div></div>
+          <div className="buy-head"><div><b>{who(b.buyer)}</b><small>кампаний {b.campaigns} · акков {b.accounts} · банов {b.bans}{b.accounts_cost ? ` · аккаунты ${money(b.accounts_cost)} в расходе` : ""}</small></div></div>
           <Nums r={b} />
         </div>)}
         {!data.by_buyer.length && <div className="empty-state">За период отчётов нет.</div>}
