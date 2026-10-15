@@ -290,6 +290,17 @@ def init_db():
         add_column(conn, "crm_users", "chatterfy_email", "TEXT")
         # CRM website login: PBKDF2 hash of the password the admin (or the user) set; never the password itself.
         add_column(conn, "crm_users", "password_hash", "TEXT")
+        # Speed to lead: when a new client first wrote and when a live operator first answered.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_response (
+                chat_id TEXT PRIMARY KEY,
+                chat_name TEXT,
+                first_in_at TEXT,
+                first_reply_at TEXT,
+                replier TEXT,
+                updated_at TEXT
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id TEXT PRIMARY KEY,
@@ -4026,6 +4037,10 @@ def run_watch(conn, max_chats=300):
             except Exception as exc:
                 print(f"watch: channel tag failed: {exc}")
     try:
+        _track_response(conn, chats, messages_by_chat, names, now)
+    except Exception as exc:
+        print(f"watch: response tracking failed: {exc}")
+    try:
         contacts = _sync_contacts(conn, client, chats, messages_by_chat)
     except Exception as exc:
         contacts = 0
@@ -4051,6 +4066,90 @@ def run_watch(conn, max_chats=300):
         conn.execute("UPDATE watch_alerts SET notified=1 WHERE notified=0")
         conn.commit()
     return status
+
+
+RESPONSE_NEW_CHAT_HOURS = 48   # only chats this young: their first messages are within the 50 we read
+WAITING_MINUTES = 10           # a client whose last message is older than this is «waiting for an answer»
+WAITING_KEY = "chats_waiting"
+
+
+def _ts(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+def _track_response(conn, chats, messages_by_chat, names, now):
+    """First client message and first answer of a live operator in new chats (the bot and AI write
+    without an author, so they do not count), plus the chats where a client is waiting right now."""
+    by_id = {c["id"]: c for c in chats}
+    for chat_id, items in messages_by_chat.items():
+        chat = by_id.get(chat_id) or {}
+        created = _ts(chat.get("created_at"))
+        if not created or now - created > timedelta(hours=RESPONSE_NEW_CHAT_HOURS):
+            continue
+        items = sorted(items, key=lambda m: m.get("created_at") or "")
+        first_in = next((m for m in items if m.get("sender_type") != "outcoming"), None)
+        if not first_in:
+            continue
+        reply = next((m for m in items if m.get("sender_type") == "outcoming" and m.get("sender")
+                      and (m.get("created_at") or "") >= (first_in.get("created_at") or "")), None)
+        replier = (names.get(reply.get("sender")) or reply.get("sender")) if reply else None
+        conn.execute(
+            "INSERT INTO chat_response(chat_id, chat_name, first_in_at, first_reply_at, replier, updated_at) VALUES(%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(chat_id) DO UPDATE SET first_reply_at=COALESCE(chat_response.first_reply_at, excluded.first_reply_at), "
+            "replier=COALESCE(chat_response.replier, excluded.replier), updated_at=excluded.updated_at",
+            (chat_id, chat.get("name"), first_in.get("created_at"), reply.get("created_at") if reply else None, replier, now.isoformat()))
+    waiting = []
+    for c in chats:
+        last = c.get("last_message") or {}
+        at = _ts(last.get("created_at"))
+        if last.get("sender_type") == "outcoming" or not at:
+            continue
+        minutes = (now - at).total_seconds() / 60
+        if WAITING_MINUTES <= minutes <= 24 * 60:  # older than a day is not «waiting», it is a lost chat
+            waiting.append({"chat_id": c["id"], "name": c.get("name"), "minutes": int(minutes), "link": _chat_link(c["id"])})
+    waiting.sort(key=lambda w: -w["minutes"])
+    set_setting(conn, WAITING_KEY, json.dumps({"at": now.isoformat(), "rows": waiting[:40]}), "watch")
+
+
+@app.get("/api/v1/stats/response")
+def response_stats(days: int = 7, x_telegram_username: str = Depends(current_username)):
+    """Speed to lead per operator: median minutes to the first live answer, share answered within 5 minutes."""
+    conn = db()
+    try:
+        user = require_access(x_telegram_username, conn)
+        if user["role"] not in ("admin", "head_buying", "handler"):
+            raise HTTPException(status_code=403, detail="Нет доступа")
+        since = (datetime.utcnow() - timedelta(days=max(1, days))).isoformat()
+        rows = [dict(r) for r in conn.execute(
+            "SELECT chat_name, first_in_at, first_reply_at, replier FROM chat_response WHERE first_in_at>=%s", (since,)).fetchall()]
+        waiting = json.loads(get_setting(conn, WAITING_KEY, "") or "{}")
+    finally:
+        conn.close()
+    me = "@" + user["username"].lower()
+    stats = {}
+    unanswered = 0
+    for r in rows:
+        if not r["first_reply_at"]:
+            unanswered += 1
+            continue
+        mins = (_ts(r["first_reply_at"]) - _ts(r["first_in_at"])).total_seconds() / 60
+        stats.setdefault(r["replier"] or "—", []).append(max(0.0, mins))
+    out = []
+    for who, mins in stats.items():
+        mins.sort()
+        out.append({"operator": who, "answered": len(mins), "median": round(mins[len(mins) // 2], 1),
+                    "within5": round(sum(1 for m in mins if m <= 5) / len(mins) * 100),
+                    "slow": sum(1 for m in mins if m > 30)})
+    out.sort(key=lambda r: r["median"])
+    if user["role"] == "handler":
+        out = [r for r in out if (r["operator"] or "").lower() == me]
+    allm = sorted(m for v in stats.values() for m in v)
+    return {"days": days, "rows": out, "unanswered": unanswered,
+            "median": round(allm[len(allm) // 2], 1) if allm else None,
+            "waiting": [] if user["role"] == "handler" else waiting.get("rows", []), "waiting_at": waiting.get("at")}
 
 
 def _watch_once():

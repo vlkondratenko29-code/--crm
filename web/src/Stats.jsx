@@ -44,6 +44,38 @@ function Row({ title, sub, r, showMoney }) {
   );
 }
 
+// Speed to lead: minutes from the client's first message to the first answer of a live operator.
+function ResponseSpeed({ username, days }) {
+  const [d, setD] = useState(null);
+  useEffect(() => { api(`/api/v1/stats/response?days=${days === "0" ? 30 : days}`, { username }).then(setD).catch(() => setD(null)); }, [username, days]);
+  if (!d) return null;
+  const tone = m => m == null ? "" : m <= 5 ? "t-ftd" : m <= 15 ? "t-money" : "t-bad";
+  const mins = m => m == null ? "—" : m < 60 ? `${Math.round(m)} мин` : `${(m / 60).toFixed(1)} ч`;
+  return <>
+    <div className="section-title">Скорость первого ответа{d.median != null ? <> · медиана <span className={tone(d.median)}>{mins(d.median)}</span></> : null}</div>
+    <div className="st-list">
+      {d.rows.map(r => <div className="buy-row" key={r.operator}>
+        <div className="buy-head"><b>{r.operator}</b><b className={tone(r.median)}>{mins(r.median)}</b></div>
+        <div className="buy-grid">
+          <span>{r.answered}<small>новых чатов</small></span>
+          <span className={r.within5 >= 70 ? "t-ftd" : "t-bad"}>{r.within5}%<small>ответ до 5 мин</small></span>
+          <span className={r.slow ? "t-bad" : ""}>{r.slow}<small>дольше 30 мин</small></span>
+        </div>
+      </div>)}
+      {!d.rows.length && <div className="empty-state">Пока нет данных. Скорость считается по новым чатам, когда в «Контроле» указан ключ Chatterfy.</div>}
+    </div>
+    {d.unanswered > 0 && <p className="recon-hint">Без ответа оператора: {d.unanswered} новых чатов за период.</p>}
+    {d.waiting.length > 0 && <>
+      <div className="section-title">Ждут ответа сейчас ({d.waiting.length})</div>
+      <div className="st-feed">{d.waiting.map(w => <div className="st-event" key={w.chat_id}>
+        <span className={"st-badge " + (w.minutes > 30 ? "t-bad" : "t-money")}>{mins(w.minutes)}</span>
+        <div><b>{w.name || "Клиент"}</b><small><a href={w.link} target="_blank" rel="noreferrer">открыть чат в Chatterfy</a></small></div>
+      </div>)}</div>
+    </>}
+    <p className="recon-hint">Считается только живой оператор: приветствие бота и AI не в счёт. Ночью без смены время растёт — смотри медиану и «до 5 мин». Обновляется вместе с «Контролем» раз в 3 минуты.</p>
+  </>;
+}
+
 export default function Stats({ username }) {
   const [days, setDays] = useState("7");
   const [tab, setTab] = useState("buying");
@@ -86,7 +118,9 @@ export default function Stats({ username }) {
         <div className="st-tabs">{tabs.map(([k, l]) => <button key={k} className={active === k ? "selected" : ""} onClick={() => setTab(k)}>{l}</button>)}</div>
 
         {active === "buying" && <Buying username={username} days={days} />}
+        {mine && <ResponseSpeed username={username} days={days} />}
 
+        {active === "handlers" && <ResponseSpeed username={username} days={days} />}
         {active === "handlers" && <div className="st-list">
           {data.by_handler.map(h => <Row key={h.handler || "none"} title={h.handler ? who(h.handler) : "Без обработчика"} r={{ ...h, leads: null }}
             sub={h.reg ? `${h.reg_to_ftd}% рег → деп` : ""} showMoney={money_} />)}
