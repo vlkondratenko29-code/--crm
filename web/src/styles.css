@@ -432,3 +432,17 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .shift-for{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:#9eacbf}
 .shift-for select{background:#121b26;border:1px solid #2a3647;border-radius:9px;color:#e7edf5;padding:7px 9px;font-size:13px}
 .shift-cover .off{background:#1a222d}
+
+/* P&L and cohorts */
+.pnl-lines{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid #202733}
+.pnl-lines p{display:flex;justify-content:space-between;gap:8px;font-size:12px;margin:0 0 4px}
+.pnl-lines span{color:#8993a3}
+.cohort-scroll{overflow-x:auto;margin:8px 0 10px;border:1px solid #202733;border-radius:12px}
+.cohort-table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}
+.cohort-table th,.cohort-table td{padding:8px 9px;text-align:right;border-bottom:1px solid #1b222d}
+.cohort-table thead th{color:#8993a3;font-weight:700;background:#0f141b}
+.cohort-table tbody th{text-align:left;position:sticky;left:0;background:#131821}
+.cohort-table tr:last-child th,.cohort-table tr:last-child td{border-bottom:0}
+@media (max-width:420px){.pnl-lines{grid-template-columns:1fr}}
+.tier-country{align-self:center;font-size:13px;text-transform:capitalize}
+.tier-country small{color:#8993a3;text-transform:none}

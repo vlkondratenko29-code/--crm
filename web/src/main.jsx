@@ -8,6 +8,7 @@ import Watch from "./Watch.jsx";
 import Payroll from "./Payroll.jsx";
 import BuyerReports from "./BuyerReports.jsx";
 import Shifts from "./Shifts.jsx";
+import Finance from "./Finance.jsx";
 import Reconcile, { pushSummary } from "./Reconcile.jsx";
 
 const tg = window.Telegram?.WebApp;
@@ -21,8 +22,8 @@ function App() {
   const user = useMemo(() => {
     if (!telegramUser) return demoUser;
     const username = telegramUser.username || "";
-    const admin = ["jokwq", "nodari777"].includes(username.toLowerCase());
-    return { username, role: admin ? "admin" : "handler", is_admin: admin };
+    // The real role comes from /api/v1/me right after start.
+    return { username, role: "handler", is_admin: false };
   }, [telegramUser]);
   const [query, setQuery] = useState("");
   const [roleInfo, setRoleInfo] = useState(null);
@@ -57,7 +58,7 @@ function App() {
   const effectiveUser = actualUser.is_admin && previewRole ? { ...actualUser, role: previewRole, is_admin: true } : actualUser;
   // `main` tabs sit in the bottom bar; the rest open from «Ещё».
   const roleMeta = {
-    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["payroll", "shifts", "reports", "watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
+    admin: { label: "АДМИН", title: "Полный доступ к CRM", main: ["stats", "dashboard", "leads", "reconcile"], more: ["pnl", "payroll", "shifts", "reports", "watch", "clients", "finance", "traffic", "operations", "alerts", "admin"] },
     head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "reports"], more: ["traffic", "clients", "reconcile", "finance"] },
     buyer: { label: "БАЕР", title: "Отчёты по расходу", main: ["reports"], more: [] },
     seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: ["payroll", "shifts"] },
@@ -354,6 +355,7 @@ function App() {
       {tab === "payroll" && canSee("payroll") && <Payroll username={effectiveUser.username} />}
       {tab === "reports" && canSee("reports") && <BuyerReports username={effectiveUser.username} />}
       {tab === "shifts" && canSee("shifts") && <Shifts username={effectiveUser.username} />}
+      {tab === "pnl" && canSee("pnl") && <Finance username={effectiveUser.username} />}
       {tab === "admin" && effectiveUser.is_admin && <section className="card">
         <p className="eyebrow">КОМАНДА</p>
         <h2>Доступ команды</h2>
@@ -371,7 +373,7 @@ function App() {
         </div>
         {teamMessage && <div className="team-message">{teamMessage}</div>}
         <div className="team-list">
-          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {member.username !== "jokwq" && member.username !== "nodari777" ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
+          {team.map((member) => <div className="team-row" key={member.username}><div><b>@{member.username}</b><small>{ROLE_LABELS[member.role] || member.role}{member.owner ? " · владелец" : ""}{member.chatterfy_email ? " · " + member.chatterfy_email : ""}</small></div><span className={member.active ? "status-dot on" : "status-dot"}>{member.active ? "Активен" : "Отключён"} {!member.owner ? <button onClick={() => disableTeamUser(member.username)}>Отключить</button> : null}</span></div>)}
         </div>
       </section>}
       {loading && tab === "clients" && !openLead && <section className="card"><p>Ищу…</p></section>}
@@ -501,12 +503,12 @@ function App() {
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
   finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",
-  payroll: "Депы и ЗП", reports: "Отчёты", shifts: "Смены",
+  payroll: "Депы и ЗП", reports: "Отчёты", shifts: "Смены", pnl: "P&L",
 };
 const TAB_ICONS = {
   dashboard: "◉", leads: "☷", reconcile: "⚖", clients: "⌕", stats: "◈",
   finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥", watch: "🛡",
-  payroll: "💵", reports: "▤", shifts: "🗓",
+  payroll: "💵", reports: "▤", shifts: "🗓", pnl: "📒",
 };
 const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", buyer: "Баер", seo: "SEO", handler: "Обработчик" };
 const STATUS_LABELS = { "Chatterfy lead": "Лид Chatterfy", "FxPro account": "Счёт FxPro" };

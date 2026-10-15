@@ -38,7 +38,8 @@ NOTIFY_EVENTS = {x.strip().upper() for x in os.getenv("NOTIFY_EVENTS", "FTD").sp
 # unless explicitly enabled (e.g. for local development).
 ALLOW_USERNAME_HEADER = os.getenv("ALLOW_USERNAME_HEADER", "0" if TELEGRAM_BOT_TOKEN else "1") == "1"
 
-PRIMARY_ADMINS = ("jokwq", "nodari777")
+# Owners: always admins, cannot be disabled from the Mini App. Set OWNER_USERNAMES on the server to change them.
+PRIMARY_ADMINS = tuple(u.strip().lstrip("@").lower() for u in os.getenv("OWNER_USERNAMES", "jokwq,nodari777").split(",") if u.strip())
 ROLES = {"admin", "head_buying", "seo", "handler", "buyer"}
 WORK_STATUSES = ("new", "in_progress", "callback", "no_answer", "won", "lost")
 STAGE_ORDER = {"LEAD": 0, "REG": 1, "FTD": 2, "FT": 3}
@@ -371,6 +372,41 @@ def init_db():
                 UNIQUE (handler, day, start_time)
             )
         """)
+        # Every broker report import keeps a dated copy of each account's totals: the reports only give
+        # running totals, so money moved in a month = difference between snapshots (used by cohorts).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS broker_account_snapshots (
+                broker TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                day TEXT NOT NULL,
+                deposits DOUBLE PRECISION,
+                withdrawals DOUBLE PRECISION,
+                balance DOUBLE PRECISION,
+                PRIMARY KEY (broker, account_id, day)
+            )
+        """)
+        # P&L: income and expenses entered by hand per month (IB, CRM, boosting, services, other salaries).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS finance_entries (
+                id TEXT PRIMARY KEY,
+                month TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                category TEXT NOT NULL,
+                amount DOUBLE PRECISION NOT NULL,
+                comment TEXT,
+                created_at TEXT,
+                created_by TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_finance_entries_month ON finance_entries(month)")
+        add_column(conn, "finance_entries", "lots", "DOUBLE PRECISION")
+        # Accounts imported before snapshots existed get their current totals as the first snapshot.
+        conn.execute("""
+            INSERT INTO broker_account_snapshots(broker, account_id, day, deposits, withdrawals, balance)
+            SELECT broker, account_id, COALESCE(substr(imported_at, 1, 10), %s), deposits, withdrawals, balance
+            FROM broker_accounts b WHERE (deposits IS NOT NULL OR withdrawals IS NOT NULL) AND NOT EXISTS (
+                SELECT 1 FROM broker_account_snapshots s WHERE s.broker=b.broker AND s.account_id=b.account_id)
+        """, (datetime.utcnow().date().isoformat(),))
         for admin_username in PRIMARY_ADMINS:
             conn.execute(
                 "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,TRUE) ON CONFLICT(username) DO UPDATE SET role='admin', active=TRUE",
@@ -711,7 +747,7 @@ def list_users(x_telegram_username: str = Depends(current_username)):
     try:
         require_admin(x_telegram_username, conn)
         rows = conn.execute("SELECT username, role, active, chatterfy_email FROM crm_users ORDER BY username").fetchall()
-        return {"users": [dict(row) for row in rows]}
+        return {"users": [{**dict(row), "owner": row["username"].lower() in PRIMARY_ADMINS} for row in rows]}
     finally:
         conn.close()
 
@@ -726,6 +762,8 @@ def upsert_user(payload: TeamUser, x_telegram_username: str = Depends(current_us
             raise HTTPException(status_code=400, detail="Username is required")
         if payload.role not in ROLES:
             raise HTTPException(status_code=400, detail="Invalid role")
+        if username in PRIMARY_ADMINS and (payload.role != "admin" or not payload.active):
+            raise HTTPException(status_code=400, detail="Владельца можно поменять только в настройке OWNER_USERNAMES на сервере")
         conn.execute(
             "INSERT INTO crm_users(username, role, active) VALUES(%s,%s,%s) ON CONFLICT(username) DO UPDATE SET role=excluded.role, active=excluded.active",
             (username, payload.role, payload.active),
@@ -745,8 +783,8 @@ def deactivate_user(username: str, x_telegram_username: str = Depends(current_us
     try:
         require_admin(x_telegram_username, conn)
         target = username.lstrip("@").strip().lower()
-        if target in {"jokwq", "nodari777"}:
-            raise HTTPException(status_code=400, detail="Primary admins cannot be deactivated")
+        if target in PRIMARY_ADMINS:
+            raise HTTPException(status_code=400, detail="Владельца можно поменять только в настройке OWNER_USERNAMES на сервере")
         conn.execute("UPDATE crm_users SET active=FALSE WHERE lower(username)=%s", (target,))
         conn.commit()
         return {"status": "ok"}
@@ -1246,6 +1284,15 @@ def upsert_broker_accounts(conn, broker, accounts):
     rows = [(broker, a["account_id"]) + tuple(a.get(c) for c in BROKER_ACCOUNT_FIELDS) + (now,) for a in accounts]
     with conn.cursor() as cur:
         cur.executemany(sql, rows)
+    snap_day = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date().isoformat()
+    snaps = [(broker, a["account_id"], snap_day, a.get("deposits"), a.get("withdrawals"), a.get("balance"))
+             for a in accounts if a.get("deposits") is not None or a.get("withdrawals") is not None]
+    if snaps:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO broker_account_snapshots(broker, account_id, day, deposits, withdrawals, balance) VALUES(%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(broker, account_id, day) DO UPDATE SET deposits=excluded.deposits, withdrawals=excluded.withdrawals, balance=excluded.balance",
+                snaps)
 
 
 @app.post("/api/v1/broker/import")
@@ -4084,33 +4131,39 @@ def delete_handler_deposit(row_id: str, x_telegram_username: str = Depends(curre
     return {"status": "ok"}
 
 
+def payroll_for_month(conn, month):
+    """Rules, salary rows and pending-deposit count of one month."""
+    start, end = _month_bounds(month)
+    rules = payroll_rules(conn)
+    handlers = [r["username"] for r in conn.execute(
+        "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
+    handlers += sorted({r["handler"] for r in conn.execute(
+        "SELECT DISTINCT handler FROM handler_deposits WHERE day>=%s AND day<=%s", (start.isoformat(), end.isoformat())).fetchall()}
+        - set(handlers))
+    deposits = [dict(r) for r in conn.execute(
+        "SELECT handler, day, amount, kind FROM handler_deposits WHERE status='approved' AND day>=%s AND day<=%s",
+        ((start - timedelta(days=6)).isoformat(), end.isoformat())).fetchall()]
+    extras = {r["handler"]: dict(r) for r in conn.execute(
+        "SELECT handler, video_reviews, dialogs_override FROM payroll_extras WHERE month=%s", (month,)).fetchall()}
+    dialogs = _handler_dialogs(conn, month, handlers)
+    pending = conn.execute("SELECT COUNT(*) AS c FROM handler_deposits WHERE status='pending' AND day>=%s AND day<=%s",
+                           (start.isoformat(), end.isoformat())).fetchone()["c"]
+    return rules, compute_payroll(month, handlers, deposits, dialogs, extras, rules), int(pending)
+
+
 @app.get("/api/v1/payroll/summary")
 def payroll_summary(month: str = "", x_telegram_username: str = Depends(current_username)):
     month = month or _current_month()
-    start, end = _month_bounds(month)
+    _month_bounds(month)
     conn = db()
     try:
         user = require_payroll_access(x_telegram_username, conn, read=True)
-        rules = payroll_rules(conn)
-        handlers = [r["username"] for r in conn.execute(
-            "SELECT username FROM crm_users WHERE active=TRUE AND role='handler' ORDER BY username").fetchall()]
-        handlers += sorted({r["handler"] for r in conn.execute(
-            "SELECT DISTINCT handler FROM handler_deposits WHERE day>=%s AND day<=%s", (start.isoformat(), end.isoformat())).fetchall()}
-            - set(handlers))
-        deposits = [dict(r) for r in conn.execute(
-            "SELECT handler, day, amount, kind FROM handler_deposits WHERE status='approved' AND day>=%s AND day<=%s",
-            ((start - timedelta(days=6)).isoformat(), end.isoformat())).fetchall()]
-        extras = {r["handler"]: dict(r) for r in conn.execute(
-            "SELECT handler, video_reviews, dialogs_override FROM payroll_extras WHERE month=%s", (month,)).fetchall()}
-        dialogs = _handler_dialogs(conn, month, handlers)
-        pending = conn.execute("SELECT COUNT(*) AS c FROM handler_deposits WHERE status='pending' AND day>=%s AND day<=%s",
-                               (start.isoformat(), end.isoformat())).fetchone()["c"]
+        rules, rows, pending = payroll_for_month(conn, month)
     finally:
         conn.close()
-    rows = compute_payroll(month, handlers, deposits, dialogs, extras, rules)
     if user["role"] == "handler":
         rows = [r for r in rows if r["handler"].lower() == user["username"].lower()]
-    return {"month": month, "rules": rules, "rows": rows, "pending": int(pending),
+    return {"month": month, "rules": rules, "rows": rows, "pending": pending,
             "total": round(sum(r["total"] for r in rows), 2), "can_edit": user["role"] == "admin"}
 
 
@@ -4414,6 +4467,359 @@ def delete_shift(row_id: str, x_telegram_username: str = Depends(current_usernam
     finally:
         conn.close()
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# P&L and cohorts: income (CPA + IB) minus traffic, salaries and other costs
+# ---------------------------------------------------------------------------
+
+FINANCE_RULES_KEY = "finance_rules"
+# FxPro CPA grid: the payout depends on the client's deposited amount and the tier of their country.
+# cpa_brackets are the lower bounds of the deposit ranges ($0-31, $31-101, ... $20000+).
+FINANCE_DEFAULT_RULES = {
+    "cpa_brackets": [0, 31, 101, 251, 501, 801, 1201, 1500, 2000, 5000, 10000, 20000],
+    "cpa_tiers": {
+        "tier1": [30, 75, 200, 400, 800, 1000, 1200, 1200, 1200, 2500, 4000, 8000],
+        "tier2": [15, 75, 200, 400, 600, 700, 800, 1200, 1200, 2500, 4000, 8000],
+        "tier3": [15, 50, 100, 200, 300, 500, 600, 1200, 1200, 2500, 4000, 8000],
+    },
+    # country as the broker report writes it (lower case) -> tier; the team works Turkey, which is tier 1
+    "country_tiers": {"turkey": "tier1", "türkiye": "tier1", "turkiye": "tier1", "tr": "tier1"},
+    "default_tier": "tier3",  # countries not listed: the lowest payout, so the estimate is never too high
+    "ib_per_lot": 16,         # $ IB pays per traded lot
+}
+FINANCE_CATEGORIES = {
+    "income": ("CPA", "IB", "Другое"),
+    "expense": ("Трафик", "ЗП", "CRM", "Накрутки", "Сервисы", "Аккаунты", "Другое"),
+}
+FINANCE_MAX_MONTHS = 12
+
+
+class FinanceEntry(BaseModel):
+    month: str
+    kind: str
+    category: str
+    amount: float | None = None
+    lots: float | None = None  # IB: traded lots, the amount is lots x ib_per_lot
+    comment: str | None = None
+
+
+def finance_rules(conn):
+    try:
+        saved = json.loads(get_setting(conn, FINANCE_RULES_KEY, "") or "{}")
+    except Exception:
+        saved = {}
+    return {**FINANCE_DEFAULT_RULES, **{k: v for k, v in saved.items() if k in FINANCE_DEFAULT_RULES}}
+
+
+def _country_key(country):
+    return re.sub(r"\s+", " ", str(country or "").strip().lower())
+
+
+def cpa_payout(amount, country, rules):
+    """CPA for one client: the grid cell of their country's tier and deposited amount."""
+    if not amount or amount <= 0:
+        return 0.0
+    tier = rules["country_tiers"].get(_country_key(country)) or rules["default_tier"]
+    row = rules["cpa_tiers"].get(tier) or rules["cpa_tiers"][FINANCE_DEFAULT_RULES["default_tier"]]
+    idx = max(i for i, low in enumerate(rules["cpa_brackets"]) if amount >= low)
+    return float(row[min(idx, len(row) - 1)])
+
+
+def _shift_month(month, delta):
+    y, m = int(month[:4]), int(month[5:7]) - 1 + delta
+    return f"{y + m // 12:04d}-{m % 12 + 1:02d}"
+
+
+def _months_between(a, b):
+    return (int(b[:4]) - int(a[:4])) * 12 + int(b[5:7]) - int(a[5:7])
+
+
+def _finance_months(conn, months):
+    """The last `months` calendar months up to the current one, not earlier than the CRM data start."""
+    months = max(1, min(int(months or 6), FINANCE_MAX_MONTHS))
+    now = _current_month()
+    first = _shift_month(now, -(months - 1))
+    since = (data_since(conn) or "")[:7]
+    if since and since > first:
+        first = min(since, now)
+    return [_shift_month(first, i) for i in range(_months_between(first, now) + 1)]
+
+
+def _traffic_by_month(conn):
+    """Traffic spend per month. Per day the larger of buyer reports and Ads Manager is taken, so the
+    two sources never double count and a day filled in only one of them is still covered."""
+    reports = {r["day"]: float(r["spend"] or 0) for r in conn.execute(
+        "SELECT day, SUM(spend) AS spend FROM buyer_reports GROUP BY day").fetchall()}
+    ads = {r["day"]: float(r["spend"] or 0) for r in conn.execute(
+        "SELECT day, SUM(spend) AS spend FROM ad_spend GROUP BY day").fetchall()}
+    out = {}
+    for d in set(reports) | set(ads):
+        out[d[:7]] = out.get(d[:7], 0.0) + max(reports.get(d, 0.0), ads.get(d, 0.0))
+    return out
+
+
+def _lead_rows(leads, rules, account_money):
+    """Per lead: lead / FTD month, country, deposits per month and the CPA payout.
+
+    CPA follows the broker: the grid cell is chosen by everything the client deposited in the
+    calendar month of their FTD (FTD + redeposits of that month)."""
+    out = []
+    used = set()  # an account matched to several leads is counted once
+    for x in leads:
+        lead_day, reg_day, ftd_day, dep = lead_funnel_days(x)
+        accs = x.get("matched_accounts") or []
+        country = next((a.get("country") for a in accs if a.get("country")), None)
+        ftd_month = ftd_day[:7] if ftd_day else None
+        by_month = {}
+        if ftd_month:
+            for a in accs:
+                key = (a.get("broker"), a.get("account_id"))
+                if key in used or key not in account_money:
+                    continue
+                used.add(key)
+                first_month, first_total, later = account_money[key]
+                start = min(first_month, ftd_month)  # the first snapshot holds the FTD and everything before it
+                by_month[start] = by_month.get(start, 0.0) + first_total
+                for month, amount in later.items():
+                    by_month[month] = by_month.get(month, 0.0) + amount
+            if not any(by_month.values()) and dep:  # no broker snapshots: the known deposit belongs to the FTD month
+                by_month = {ftd_month: dep}
+        out.append({"lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day),
+                    "ftd_month": ftd_month, "country": country, "deposits_by_month": by_month,
+                    "cpa": cpa_payout(by_month.get(ftd_month, 0.0), country, rules) if ftd_month else 0.0})
+    return out
+
+
+@app.get("/api/v1/pnl")
+def profit_and_loss(months: int = 6, x_telegram_username: str = Depends(current_username)):
+    """Monthly P&L: CPA (calculated from FTDs, or the actual payout if entered) + IB + other income,
+    minus traffic, handler salaries from payroll and the costs entered by hand."""
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        month_list = _finance_months(conn, months)
+        rules = finance_rules(conn)
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        traffic = _traffic_by_month(conn)
+        entries = [dict(r) for r in conn.execute(
+            "SELECT month, kind, category, amount FROM finance_entries WHERE month>=%s AND month<=%s",
+            (month_list[0], month_list[-1])).fetchall()]
+        payroll = {m: round(sum(r["total"] for r in payroll_for_month(conn, m)[1]), 2) for m in month_list}
+        account_money = _account_deposits_by_month(conn)
+    finally:
+        conn.close()
+
+    rows = _lead_rows(leads, rules, account_money)
+    out = []
+    for m in month_list:
+        manual = {}
+        for e in entries:
+            if e["month"] == m:
+                k = (e["kind"], e["category"])
+                manual[k] = manual.get(k, 0.0) + float(e["amount"] or 0)
+        ftd = sum(1 for r in rows if r["ftd_month"] == m)
+        cpa_calc = sum(r["cpa"] for r in rows if r["ftd_month"] == m)
+        cpa_fact = ("income", "CPA") in manual
+        income = {"CPA": manual[("income", "CPA")] if cpa_fact else cpa_calc,
+                  "IB": manual.get(("income", "IB"), 0.0), "Другое": manual.get(("income", "Другое"), 0.0)}
+        expense = {c: manual.get(("expense", c), 0.0) for c in FINANCE_CATEGORIES["expense"]}
+        expense["Трафик"] += traffic.get(m, 0.0)
+        expense["ЗП"] += payroll[m]
+        inc, exp = sum(income.values()), sum(expense.values())
+        out.append({
+            "month": m, "leads": sum(1 for r in rows if r["lead_month"] == m), "ftd": ftd,
+            "income": {k: round(v, 2) for k, v in income.items()}, "income_total": round(inc, 2),
+            "cpa_source": "fact" if cpa_fact else "calc", "cpa_calc": round(cpa_calc, 2),
+            "expense": {k: round(v, 2) for k, v in expense.items()}, "expense_total": round(exp, 2),
+            "traffic_auto": round(traffic.get(m, 0.0), 2), "payroll_auto": payroll[m],
+            "profit": round(inc - exp, 2),
+            "margin": round((inc - exp) / inc * 100, 1) if inc else None,
+            "roi": round((inc - exp) / exp * 100, 1) if exp else None,
+            "cost_per_ftd": round(expense["Трафик"] / ftd, 2) if ftd else None,
+        })
+    total_inc = sum(r["income_total"] for r in out)
+    total_exp = sum(r["expense_total"] for r in out)
+    countries = {}
+    for r in rows:
+        if r["ftd_month"] and r["country"]:
+            countries[_country_key(r["country"])] = countries.get(_country_key(r["country"]), 0) + 1
+    return {"months": out, "rules": rules, "categories": FINANCE_CATEGORIES,
+            "countries": sorted(({"country": k, "ftd": v} for k, v in countries.items()), key=lambda c: -c["ftd"]),
+            "total": {"income": round(total_inc, 2), "expense": round(total_exp, 2), "profit": round(total_inc - total_exp, 2),
+                      "ftd": sum(r["ftd"] for r in out),
+                      "roi": round((total_inc - total_exp) / total_exp * 100, 1) if total_exp else None}}
+
+
+def _account_deposits_by_month(conn):
+    """(broker, account_id) -> (first snapshot month, its deposit total, {month: deposits made later}).
+
+    Broker reports only carry running totals, so money deposited in a month is the growth between
+    snapshots. The first snapshot holds everything deposited before it; the caller books it to the
+    account's FTD month. A report downloaded on a day covers the days before it, so a snapshot
+    counts for the month of the previous day: a report uploaded on 1 November closes October."""
+    def month_of(day):
+        d = _parse_day(day)
+        return (d - timedelta(days=1)).isoformat()[:7] if d else str(day)[:7]
+
+    hist = {}
+    for r in conn.execute("SELECT broker, account_id, day, deposits FROM broker_account_snapshots ORDER BY day").fetchall():
+        hist.setdefault((r["broker"], r["account_id"]), []).append((r["day"], float(r["deposits"] or 0)))
+    out = {}
+    for key, snaps in hist.items():
+        first_day, prev = snaps[0]
+        later = {}
+        for day, total in snaps[1:]:
+            if total > prev:
+                later[month_of(day)] = later.get(month_of(day), 0.0) + total - prev
+            prev = max(prev, total)
+        out[key] = (month_of(first_day), snaps[0][1], later)
+    return out
+
+
+@app.get("/api/v1/cohorts")
+def cohorts(months: int = 6, x_telegram_username: str = Depends(current_username)):
+    """Cohorts by the month a lead came in: funnel, traffic of that month, CPA revenue and ROI,
+    plus how FTDs, deposits and CPA revenue accumulate month by month after the lead came."""
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        month_list = _finance_months(conn, months)
+        rules = finance_rules(conn)
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        traffic = _traffic_by_month(conn)
+        account_money = _account_deposits_by_month(conn)
+    finally:
+        conn.close()
+
+    now = month_list[-1]
+    width = len(month_list)
+    groups = {m: {"month": m, "leads": 0, "reg": 0, "ftd": 0, "cpa": 0.0, "deposits": 0.0,
+                  "ftd_by": [0] * width, "cpa_by": [0.0] * width, "dep_by": [0.0] * width} for m in month_list}
+    for r in _lead_rows(leads, rules, account_money):
+        g = groups.get(r["lead_month"])
+        if not g or not r["lead_month"]:
+            continue
+        g["leads"] += 1
+        g["reg"] += int(r["reg"])
+        if not r["ftd_month"]:
+            continue
+
+        def off(month, start=g["month"]):  # month of life: 0 = the month the lead came
+            return min(max(_months_between(start, month), 0), width - 1)
+
+        g["ftd"] += 1
+        g["ftd_by"][off(r["ftd_month"])] += 1
+        g["cpa"] += r["cpa"]
+        g["cpa_by"][off(r["ftd_month"])] += r["cpa"]
+        for month, amount in r["deposits_by_month"].items():
+            g["dep_by"][off(month)] += amount
+            g["deposits"] += amount
+
+    out = []
+    for m in month_list:
+        g = groups[m]
+        age = _months_between(m, now) + 1  # months of life observed so far, current month included
+        spend = traffic.get(m, 0.0)
+        revenue = g["cpa"]
+
+        def cum(xs):
+            return [round(sum(xs[:i + 1]), 2) for i in range(age)] + [None] * (width - age)
+
+        cum_cpa = cum(g["cpa_by"])
+        out.append({
+            "month": m, "leads": g["leads"], "reg": g["reg"], "ftd": g["ftd"],
+            "lead_to_ftd": round(g["ftd"] / g["leads"] * 100, 1) if g["leads"] else None,
+            "spend": round(spend, 2), "cpl": round(spend / g["leads"], 2) if g["leads"] else None,
+            "cost_per_ftd": round(spend / g["ftd"], 2) if g["ftd"] else None,
+            "deposits": round(g["deposits"], 2), "cpa_revenue": round(revenue, 2),
+            "roi": round((revenue - spend) / spend * 100, 1) if spend else None,
+            "ftd_pct_cum": [None if v is None else (round(v / g["leads"] * 100, 1) if g["leads"] else 0) for v in cum(g["ftd_by"])],
+            "deposits_cum": cum(g["dep_by"]),
+            "roi_cum": [None if v is None else (round((v - spend) / spend * 100, 1) if spend else None) for v in cum_cpa],
+        })
+    return {"cohorts": out, "width": width, "rules": rules}
+
+
+@app.get("/api/v1/finance/entries")
+def list_finance_entries(month: str = "", x_telegram_username: str = Depends(current_username)):
+    month = month or _current_month()
+    _month_bounds(month)
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM finance_entries WHERE month=%s ORDER BY kind DESC, category, created_at", (month,)).fetchall()]
+    finally:
+        conn.close()
+    return {"month": month, "rows": rows, "categories": FINANCE_CATEGORIES}
+
+
+@app.post("/api/v1/finance/entries")
+def add_finance_entry(payload: FinanceEntry, x_telegram_username: str = Depends(current_username)):
+    _month_bounds(payload.month)
+    if payload.category not in FINANCE_CATEGORIES.get(payload.kind, ()):
+        raise HTTPException(status_code=400, detail="Неизвестная статья")
+    lots = payload.lots if payload.kind == "income" and payload.category == "IB" and payload.lots else None
+    if lots is not None and lots <= 0:
+        raise HTTPException(status_code=400, detail="Лотов должно быть больше нуля")
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        amount = lots * float(finance_rules(conn)["ib_per_lot"]) if lots is not None else payload.amount
+        if amount is None or amount <= 0:
+            raise HTTPException(status_code=400, detail="Сумма должна быть больше нуля")
+        row_id = uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO finance_entries(id, month, kind, category, amount, lots, comment, created_at, created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (row_id, payload.month, payload.kind, payload.category, round(float(amount), 2), lots,
+             (payload.comment or "").strip()[:300] or None, datetime.utcnow().isoformat(), admin),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": row_id}
+
+
+@app.delete("/api/v1/finance/entries/{row_id}")
+def delete_finance_entry(row_id: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        conn.execute("DELETE FROM finance_entries WHERE id=%s", (row_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.post("/api/v1/settings/finance")
+def save_finance_rules(payload: dict, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        rules = finance_rules(conn)
+        try:
+            if "ib_per_lot" in payload:
+                rules["ib_per_lot"] = max(0.0, float(payload["ib_per_lot"]))
+            if "cpa_brackets" in payload:
+                rules["cpa_brackets"] = sorted(max(0.0, float(v)) for v in payload["cpa_brackets"])
+            if "cpa_tiers" in payload:
+                rules["cpa_tiers"] = {str(t): [max(0.0, float(v)) for v in row] for t, row in payload["cpa_tiers"].items()}
+            if "country_tiers" in payload:
+                rules["country_tiers"] = {_country_key(c): str(t) for c, t in payload["country_tiers"].items()
+                                          if _country_key(c) and str(t) in rules["cpa_tiers"]}
+            if "default_tier" in payload and payload["default_tier"] in rules["cpa_tiers"]:
+                rules["default_tier"] = payload["default_tier"]
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(status_code=400, detail="Проверь числа")
+        if not rules["cpa_brackets"] or any(len(row) != len(rules["cpa_brackets"]) for row in rules["cpa_tiers"].values()):
+            raise HTTPException(status_code=400, detail="В каждом тире должно быть столько ставок, сколько диапазонов депозита")
+        set_setting(conn, FINANCE_RULES_KEY, json.dumps(rules), admin)
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok", "rules": rules}
 
 
 # Serve the built Telegram Mini App from the same HTTPS origin as the API.
