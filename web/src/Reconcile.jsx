@@ -113,8 +113,9 @@ export function pushSummary(p) {
   if (!p) return "";
   if (p.error) return "Отправка в Chatterfy: ошибка — " + p.error;
   if (!p.configured) return "Отправка в Chatterfy не настроена (вкладка «Сверка» → «Регистрации и депозиты → Chatterfy»).";
-  if (p.dry_run) return `Готово к отправке: ${p.candidates - p.no_click_id} событий` + (p.no_click_id ? ` · без Click ID (не отправить): ${p.no_click_id}` : "");
-  return `В Chatterfy отправлено: ${p.sent}` + (p.failed ? ` · ошибок: ${p.failed}` : "") + (p.no_click_id ? ` · без Click ID: ${p.no_click_id}` : "");
+  const noUrl = p.no_url ? ` · нет ссылки постбэка для их ГЕО: ${p.no_url}` : "";
+  if (p.dry_run) return `Готово к отправке: ${p.candidates - p.no_click_id - (p.no_url || 0)} событий` + (p.no_click_id ? ` · без Click ID (не отправить): ${p.no_click_id}` : "") + noUrl;
+  return `В Chatterfy отправлено: ${p.sent}` + (p.failed ? ` · ошибок: ${p.failed}` : "") + (p.no_click_id ? ` · без Click ID: ${p.no_click_id}` : "") + noUrl;
 }
 
 function ChatterfyPush({ username }) {
@@ -127,9 +128,14 @@ function ChatterfyPush({ username }) {
     api("/api/v1/settings/chatterfy-postback", { username }).then(r => { setUrl(r.url || ""); setSaved(r); }).catch(e => setMsg(e.message));
   }, [username]);
 
-  async function save() {
+  const [geoUrls, setGeoUrls] = useState({});
+  useEffect(() => { if (saved) setGeoUrls(saved.by_geo || {}); }, [saved]);
+  async function save(geo) {
     setBusy(true); setMsg("");
-    try { await api("/api/v1/settings/chatterfy-postback", { username, method: "POST", body: { url } }); setMsg("Ссылка сохранена."); }
+    try {
+      await api("/api/v1/settings/chatterfy-postback", { username, method: "POST", body: geo ? { url: geoUrls[geo] || "", geo } : { url } });
+      setMsg(geo ? `Ссылка для ${geo} сохранена.` : "Ссылка сохранена.");
+    }
     catch (e) { setMsg(e.message); }
     finally { setBusy(false); }
   }
@@ -146,11 +152,16 @@ function ChatterfyPush({ username }) {
       <p className="recon-hint">После загрузки отчёта брокера CRM сама сообщает в Chatterfy, кто зарегистрировался и кто внёс депозит (с суммой). Там клиенту ставятся этап и тег. Вставь сюда ссылку Custom Postback из Chatterfy (Tracker → Integrations). Лиды без Click ID отправить нельзя.</p>
       <div className="note-form">
         <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://… ссылка постбэка из Chatterfy" />
-        <button className="primary" disabled={busy} onClick={save}>Сохранить</button>
+        <button className="primary" disabled={busy} onClick={() => save()}>Сохранить</button>
       </div>
+      {(saved?.geos || []).filter(g => g !== saved.default_geo).map(g => <div className="note-form" style={{ marginTop: 8 }} key={g}>
+        <input value={geoUrls[g] || ""} onChange={e => setGeoUrls({ ...geoUrls, [g]: e.target.value })} placeholder={`${g}: ссылка постбэка бота ${g} (пусто — основная)`} />
+        <button className="primary" disabled={busy} onClick={() => save(g)}>Сохранить</button>
+      </div>)}
+      {saved?.geos?.length > 1 && <p className="recon-hint">Основная ссылка — для {saved.default_geo} и всех ГЕО без своей ссылки. У каждого ГЕО свой бот, поэтому для него нужна ссылка постбэка из его бота.</p>}
       <div className="note-form" style={{ marginTop: 8 }}>
-        <button className="load-more" disabled={busy || !url} onClick={() => push(true)}>Проверить, что уйдёт</button>
-        <button className="load-more" disabled={busy || !url} onClick={() => push(false)}>Отправить сейчас</button>
+        <button className="load-more" disabled={busy || !(url || Object.values(geoUrls).some(Boolean))} onClick={() => push(true)}>Проверить, что уйдёт</button>
+        <button className="load-more" disabled={busy || !(url || Object.values(geoUrls).some(Boolean))} onClick={() => push(false)}>Отправить сейчас</button>
       </div>
       {saved?.pushes && Object.keys(saved.pushes).length > 0 && <p className="recon-hint">Уже отправлено: {saved.pushes.sent || 0}{saved.pushes.failed ? ` · с ошибкой: ${saved.pushes.failed}` : ""}</p>}
       {msg && <div className="team-message">{msg}</div>}

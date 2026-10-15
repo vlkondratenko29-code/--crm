@@ -129,10 +129,10 @@ function CpaRules({ username, rules, countries, onChanged }) {
   </>;
 }
 
-function Entries({ username, rules, countries, onChanged }) {
+function Entries({ username, rules, countries, geos, onChanged }) {
   const [month, setMonth] = useState(monthNow());
   const [data, setData] = useState(null);
-  const [form, setForm] = useState({ kind: "expense", category: "CRM", amount: "", comment: "" });
+  const [form, setForm] = useState({ kind: "expense", category: "CRM", amount: "", comment: "", geo: "" });
   const [msg, setMsg] = useState("");
   const isIb = form.kind === "income" && form.category === "IB";
 
@@ -146,7 +146,7 @@ function Entries({ username, rules, countries, onChanged }) {
     setMsg("");
     try {
       const n = Number(String(form.amount).replace(",", "."));
-      await api("/api/v1/finance/entries", { username, method: "POST", body: { month, kind: form.kind, category: form.category, comment: form.comment, ...(isIb ? { lots: n } : { amount: n }) } });
+      await api("/api/v1/finance/entries", { username, method: "POST", body: { month, kind: form.kind, category: form.category, comment: form.comment, geo: form.geo || null, ...(isIb ? { lots: n } : { amount: n }) } });
       setForm({ ...form, amount: "", comment: "" }); await load(); onChanged();
     } catch (e) { setMsg(e.message); }
   }
@@ -172,6 +172,8 @@ function Entries({ username, rules, countries, onChanged }) {
         <label>{isIb ? `Лоты (× $${rules?.ib_per_lot ?? 16})` : "Сумма, $"}<input type="number" inputMode="decimal" min="0" value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} /></label>
         <label>Комментарий<input value={form.comment} onChange={e => setForm({ ...form, comment: e.target.value })} placeholder="за что" /></label>
       </div>
+      {geos.length > 1 && <label>ГЕО<select value={form.geo} onChange={e => setForm({ ...form, geo: e.target.value })}>
+        <option value="">Весь проект</option>{geos.map(g => <option key={g} value={g}>{g}</option>)}</select></label>}
       <button className="upload-btn" disabled={!form.amount || !data} onClick={add}>Добавить в {monthLabel(month)}</button>
       <p className="recon-hint">Трафик из отчётов баеров / Ads Manager и ЗП обработчиков считаются сами. Здесь вносится остальное: IB, CRM, накрутки, сервисы, аккаунты, ЗП команды.
         Если внести «CPA» как доход, за этот месяц берётся факт выплаты вместо расчёта.</p>
@@ -182,7 +184,7 @@ function Entries({ username, rules, countries, onChanged }) {
       {(data?.rows || []).map(r => <div className="st-event watch-event" key={r.id}>
         <span className="st-badge">{r.kind === "income" ? "доход" : "расход"}</span>
         <div><b>{r.category} · <span className={r.kind === "income" ? "t-ftd" : "t-bad"}>{money(r.amount)}</span></b>
-          <small>{r.lots ? `${r.lots} лотов · ` : ""}{r.comment || ""}{r.created_by ? " · @" + r.created_by : ""}</small>
+          <small>{r.geo ? `${r.geo} · ` : ""}{r.lots ? `${r.lots} лотов · ` : ""}{r.comment || ""}{r.created_by ? " · @" + r.created_by : ""}</small>
           <div className="pay-actions"><button className="mini-btn" onClick={() => remove(r.id)}>Удалить</button></div></div>
       </div>)}
       {data && !data.rows.length && <div className="empty-state">За этот месяц записей нет.</div>}
@@ -194,6 +196,7 @@ function Entries({ username, rules, countries, onChanged }) {
 export default function Finance({ username }) {
   const [view, setView] = useState("pnl");
   const [months, setMonths] = useState("6");
+  const [geo, setGeo] = useState("");
   const [pnl, setPnl] = useState(null);
   const [cohorts, setCohorts] = useState(null);
   const [error, setError] = useState("");
@@ -202,12 +205,12 @@ export default function Finance({ username }) {
     setError("");
     try {
       const [p, c] = await Promise.all([
-        api(`/api/v1/pnl?months=${months}`, { username, timeout: 90000 }),
-        api(`/api/v1/cohorts?months=${months}`, { username, timeout: 90000 }),
+        api(`/api/v1/pnl?months=${months}&geo=${geo}`, { username, timeout: 90000 }),
+        api(`/api/v1/cohorts?months=${months}&geo=${geo}`, { username, timeout: 90000 }),
       ]);
       setPnl(p); setCohorts(c);
     } catch (e) { setError(e.message); }
-  }, [months, username]);
+  }, [months, geo, username]);
   useEffect(() => { load(); }, [load]);
 
   const t = pnl?.total;
@@ -216,6 +219,9 @@ export default function Finance({ username }) {
       <div className="role-hero"><div><p className="eyebrow">P&L · КОГОРТЫ</p><h2>Прибыль проекта</h2>
         <p>CPA и IB минус трафик, ЗП и остальные расходы. Когорты по месяцу прихода лида.</p></div><span>📒</span></div>
       <div className="period-switch">{PERIODS.map(([v, l]) => <button key={v} className={months === v ? "selected" : ""} onClick={() => setMonths(v)}>{l}</button>)}</div>
+      {pnl?.geos?.length > 1 && <div className="period-switch filter-switch">
+        {[["", "Все ГЕО"], ...pnl.geos.map(g => [g, g])].map(([v, l]) => <button key={v} className={geo === v ? "selected" : ""} onClick={() => setGeo(v)}>{l}</button>)}</div>}
+      {geo && <p className="recon-hint">Только {geo}: лиды бота {geo}, трафик его кампаний и записи с пометкой {geo}. ЗП и общие расходы проекта — в «Все ГЕО».</p>}
       {error && <div className="team-message">{error} <button className="link-btn" onClick={load}>Повторить</button></div>}
       {t && <div className="st-kpis">
         <div><span>Прибыль</span><b className={tone(t.profit)}>{money(t.profit)}</b><small>за период</small></div>
@@ -228,7 +234,7 @@ export default function Finance({ username }) {
       {view === "pnl" && pnl && <div className="st-list">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} />)}
         <p className="recon-hint">CPA (расчёт) — по месяцу FTD, по сетке FxPro: тир страны × сумма депозитов клиента за месяц FTD. IB — лоты × ставка, вносится во вкладке «Внести». Трафик за день берётся по большему из двух источников: отчёты баеров или Ads Manager, чтобы не считать дважды.</p></div>}
       {view === "cohorts" && cohorts && <Cohorts data={cohorts} />}
-      {view === "entries" && <Entries username={username} rules={pnl?.rules} countries={pnl?.countries} onChanged={load} />}
+      {view === "entries" && <Entries username={username} rules={pnl?.rules} countries={pnl?.countries} geos={pnl?.geos || []} onChanged={load} />}
       {!pnl && !error && view !== "entries" && <p className="subtitle">Считаю… первый раз может занять до минуты.</p>}
     </section>
   );

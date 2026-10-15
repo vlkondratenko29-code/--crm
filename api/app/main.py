@@ -400,6 +400,7 @@ def init_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_finance_entries_month ON finance_entries(month)")
         add_column(conn, "finance_entries", "lots", "DOUBLE PRECISION")
+        add_column(conn, "finance_entries", "geo", "TEXT")
         # Accounts imported before snapshots existed get their current totals as the first snapshot.
         conn.execute("""
             INSERT INTO broker_account_snapshots(broker, account_id, day, deposits, withdrawals, balance)
@@ -820,6 +821,14 @@ def clean_attribution_value(value):
 
 # Ad campaign name: Facebook campaign from the lead params first, then the tracker's names.
 CAMPAIGN_KEYS = ("campaign_name", "tracker_campaign_name", "tracker_campaign", "utm_campaign")
+# Every GEO has its own Chatterfy bot; its webhook URL carries &geo=TR / &geo=MX ...
+# Leads that came before (or from a bot without the parameter) belong to the default GEO.
+GEO_DEFAULT = os.getenv("GEO_DEFAULT", "TR").strip().upper() or "TR"
+
+
+def clean_geo(value):
+    value = re.sub(r"[^A-Za-z0-9_-]", "", str(value or "")).upper()[:12]
+    return value or None
 SOURCE_KEYS = ("tracker_source_name", "site_source_name", "utm_source", "tracker_source")
 
 
@@ -1153,7 +1162,7 @@ async def chatterfy_webhook(
     tracker_campaign: str | None = None, tracker_source: str | None = None, tracker_domain_id: str | None = None,
     tracker_landing_id: str | None = None, tracker_source_name: str | None = None,
     tracker_campaign_name: str | None = None, secret: str | None = None, phone: str | None = None,
-    operator_email: str | None = None, operator_name: str | None = None
+    operator_email: str | None = None, operator_name: str | None = None, geo: str | None = None
 ):
     if CHATTERFY_WEBHOOK_SECRET:
         provided = secret or request.headers.get("x-webhook-secret") or ""
@@ -1170,7 +1179,7 @@ async def chatterfy_webhook(
         "tracker_domain_id": tracker_domain_id, "tracker_landing_id": tracker_landing_id,
         "tracker_source_name": tracker_source_name, "tracker_campaign_name": tracker_campaign_name,
         "name": name, "username": username, "chatterfy_id": chatterfy_id,
-        "step_key": step_key, "created_at": created_at
+        "step_key": step_key, "created_at": created_at, "geo": geo
     }
     if request.method == "POST":
         try:
@@ -1197,6 +1206,7 @@ async def chatterfy_webhook(
     chat_id = str(chat_id)
 
     attribution = {k: clean_attribution_value(v) for k, v in attribution.items()}
+    attribution["geo"] = clean_geo(attribution["geo"])
     incoming_attr = {k: v for k, v in attribution.items() if v is not None}
 
     # The Chatterfy field "UID / email клиента" may hold either an email or the
@@ -2476,6 +2486,7 @@ def build_leads(conn, viewer, accounts=None):
             "broker_match": method,
             "brokers": sorted({a["broker"] for a in matched}),
             "matched_accounts": matched,
+            "geo": clean_geo(attr.get("geo")) or GEO_DEFAULT,
             "assignee": w.get("assignee"),
             "work_status": w.get("work_status") or "new",
             "callback_at": w.get("callback_at"),
@@ -2815,6 +2826,15 @@ def reconciliation(broker: str = "", x_telegram_username: str = Depends(current_
 # ---------------------------------------------------------------------------
 
 CHATTERFY_POSTBACK_KEY = "chatterfy_postback_url"
+CHATTERFY_POSTBACK_GEO_KEY = "chatterfy_postback_urls"  # {GEO: url}; a GEO without its own link uses the main one
+
+
+def postback_urls(conn):
+    try:
+        by_geo = json.loads(get_setting(conn, CHATTERFY_POSTBACK_GEO_KEY, "") or "{}")
+    except Exception:
+        by_geo = {}
+    return get_setting(conn, CHATTERFY_POSTBACK_KEY), {k: v for k, v in by_geo.items() if v}
 CHATTERFY_PUSH_LIMIT = 200
 
 
@@ -2872,18 +2892,22 @@ def _deposit_amount(accs):
 def run_chatterfy_push(conn, dry_run=False):
     import urllib.parse
     import urllib.request
-    url = get_setting(conn, CHATTERFY_POSTBACK_KEY)
+    main_url, geo_urls = postback_urls(conn)
     candidates = chatterfy_push_candidates(conn)
-    stats = {"configured": bool(url), "candidates": len(candidates), "sent": 0, "failed": 0,
-             "no_click_id": 0, "dry_run": dry_run, "examples": []}
-    if not url:
+    stats = {"configured": bool(main_url or geo_urls), "candidates": len(candidates), "sent": 0, "failed": 0,
+             "no_click_id": 0, "no_url": 0, "dry_run": dry_run, "examples": []}
+    if not stats["configured"]:
         return stats
-    parts, kept = _postback_base(url)
     for lead, ev, accs in candidates[:CHATTERFY_PUSH_LIMIT]:
         click_id = (lead.get("click_id") or "").strip()
         if not click_id:
             stats["no_click_id"] += 1
             continue
+        url = geo_urls.get(lead.get("geo")) or main_url  # each GEO bot has its own postback link
+        if not url:
+            stats["no_url"] += 1
+            continue
+        parts, kept = _postback_base(url)
         amount = _deposit_amount(accs) if ev == "FTD" else None
         reg_dates = [a.get("registration_date") for a in accs if a.get("registration_date")]
         params = kept + [
@@ -2936,6 +2960,7 @@ def push_after_import():
 
 class ChatterfyPostbackSetting(BaseModel):
     url: str = ""
+    geo: str | None = None  # empty: the main link
 
 
 @app.get("/api/v1/settings/chatterfy-postback")
@@ -2943,9 +2968,11 @@ def read_chatterfy_postback(x_telegram_username: str = Depends(current_username)
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
-        url = get_setting(conn, CHATTERFY_POSTBACK_KEY)
+        url, by_geo = postback_urls(conn)
         last = conn.execute("SELECT status, COUNT(*) AS c FROM chatterfy_pushes GROUP BY status").fetchall()
-        return {"url": url, "pushes": {r["status"]: int(r["c"]) for r in last}}
+        geos = sorted({x["geo"] for x in build_leads(conn, {"role": "admin", "username": "system"})} | set(by_geo) | {GEO_DEFAULT})
+        return {"url": url, "by_geo": by_geo, "geos": geos, "default_geo": GEO_DEFAULT,
+                "pushes": {r["status"]: int(r["c"]) for r in last}}
     finally:
         conn.close()
 
@@ -2955,12 +2982,18 @@ def save_chatterfy_postback(payload: ChatterfyPostbackSetting, x_telegram_userna
     url = (payload.url or "").strip()
     if url and not url.startswith("https://"):
         raise HTTPException(status_code=400, detail="Ссылка должна начинаться с https://")
+    geo = clean_geo(payload.geo)
     conn = db()
     try:
         username = require_admin(x_telegram_username, conn)
-        set_setting(conn, CHATTERFY_POSTBACK_KEY, url, username)
+        if geo:
+            _, by_geo = postback_urls(conn)
+            by_geo[geo] = url
+            set_setting(conn, CHATTERFY_POSTBACK_GEO_KEY, json.dumps({k: v for k, v in by_geo.items() if v}), username)
+        else:
+            set_setting(conn, CHATTERFY_POSTBACK_KEY, url, username)
         conn.commit()
-        return {"status": "ok", "url": url}
+        return {"status": "ok", "url": url, "geo": geo}
     finally:
         conn.close()
 
@@ -4499,6 +4532,7 @@ class FinanceEntry(BaseModel):
     month: str
     kind: str
     category: str
+    geo: str | None = None  # empty: a cost of the whole project
     amount: float | None = None
     lots: float | None = None  # IB: traded lots, the amount is lots x ib_per_lot
     comment: str | None = None
@@ -4546,16 +4580,31 @@ def _finance_months(conn, months):
     return [_shift_month(first, i) for i in range(_months_between(first, now) + 1)]
 
 
-def _traffic_by_month(conn):
-    """Traffic spend per month. Per day the larger of buyer reports and Ads Manager is taken, so the
-    two sources never double count and a day filled in only one of them is still covered."""
-    reports = {r["day"]: float(r["spend"] or 0) for r in conn.execute(
-        "SELECT day, SUM(spend) AS spend FROM buyer_reports GROUP BY day").fetchall()}
-    ads = {r["day"]: float(r["spend"] or 0) for r in conn.execute(
-        "SELECT day, SUM(spend) AS spend FROM ad_spend GROUP BY day").fetchall()}
+def _campaign_geos(leads):
+    """Campaign -> GEO: the GEO most of the campaign's leads came from (spend reports have no country)."""
+    votes = {}
+    for x in leads:
+        if x.get("campaign"):
+            c = votes.setdefault(_key(x["campaign"]), {})
+            c[x["geo"]] = c.get(x["geo"], 0) + 1
+    return {k: max(v, key=v.get) for k, v in votes.items()}
+
+
+def _traffic_by_month(conn, geo=None, campaign_geos=None):
+    """Traffic spend per month, of one GEO if given. Per day the larger of buyer reports and Ads Manager
+    is taken, so the two sources never double count and a day filled in only one of them is still covered."""
+    def by_day(table):  # (day, GEO of the campaign) -> spend
+        out = {}
+        for r in conn.execute(f"SELECT day, campaign, SUM(spend) AS spend FROM {table} GROUP BY day, campaign").fetchall():
+            k = (r["day"], (campaign_geos or {}).get(_key(r["campaign"])))
+            out[k] = out.get(k, 0.0) + float(r["spend"] or 0)
+        return out
+    reports, ads = by_day("buyer_reports"), by_day("ad_spend")
     out = {}
-    for d in set(reports) | set(ads):
-        out[d[:7]] = out.get(d[:7], 0.0) + max(reports.get(d, 0.0), ads.get(d, 0.0))
+    for k in set(reports) | set(ads):  # the max is taken per GEO, so the GEOs add up to the total
+        if geo and k[1] != geo:
+            continue
+        out[k[0][:7]] = out.get(k[0][:7], 0.0) + max(reports.get(k, 0.0), ads.get(k, 0.0))
     return out
 
 
@@ -4569,7 +4618,8 @@ def _lead_rows(leads, rules, account_money):
     for x in leads:
         lead_day, reg_day, ftd_day, dep = lead_funnel_days(x)
         accs = x.get("matched_accounts") or []
-        country = next((a.get("country") for a in accs if a.get("country")), None)
+        # The broker report's country; before the client shows up there, the GEO of the bot (TR, MX ...).
+        country = next((a.get("country") for a in accs if a.get("country")), None) or x["geo"]
         ftd_month = ftd_day[:7] if ftd_day else None
         by_month = {}
         if ftd_month:
@@ -4585,32 +4635,41 @@ def _lead_rows(leads, rules, account_money):
                     by_month[month] = by_month.get(month, 0.0) + amount
             if not any(by_month.values()) and dep:  # no broker snapshots: the known deposit belongs to the FTD month
                 by_month = {ftd_month: dep}
-        out.append({"lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day),
+        out.append({"lead_month": lead_day[:7] if lead_day else None, "reg": bool(reg_day), "geo": x["geo"],
                     "ftd_month": ftd_month, "country": country, "deposits_by_month": by_month,
                     "cpa": cpa_payout(by_month.get(ftd_month, 0.0), country, rules) if ftd_month else 0.0})
     return out
 
 
 @app.get("/api/v1/pnl")
-def profit_and_loss(months: int = 6, x_telegram_username: str = Depends(current_username)):
+def profit_and_loss(months: int = 6, geo: str = "", x_telegram_username: str = Depends(current_username)):
     """Monthly P&L: CPA (calculated from FTDs, or the actual payout if entered) + IB + other income,
-    minus traffic, handler salaries from payroll and the costs entered by hand."""
+    minus traffic, handler salaries from payroll and the costs entered by hand.
+
+    With a GEO: only that GEO's leads, its campaigns' traffic and the entries marked with it.
+    Salaries and costs of the whole project stay in the overall P&L."""
+    geo = clean_geo(geo)
     conn = db()
     try:
         require_admin(x_telegram_username, conn)
         month_list = _finance_months(conn, months)
         rules = finance_rules(conn)
         leads = build_leads(conn, {"role": "admin", "username": "system"})
-        traffic = _traffic_by_month(conn)
+        traffic = _traffic_by_month(conn, geo, _campaign_geos(leads))
         entries = [dict(r) for r in conn.execute(
-            "SELECT month, kind, category, amount FROM finance_entries WHERE month>=%s AND month<=%s",
+            "SELECT month, kind, category, amount, geo FROM finance_entries WHERE month>=%s AND month<=%s",
             (month_list[0], month_list[-1])).fetchall()]
-        payroll = {m: round(sum(r["total"] for r in payroll_for_month(conn, m)[1]), 2) for m in month_list}
+        payroll = {m: 0.0 if geo else round(sum(r["total"] for r in payroll_for_month(conn, m)[1]), 2) for m in month_list}
         account_money = _account_deposits_by_month(conn)
+        entry_geos = {r["geo"] for r in conn.execute("SELECT DISTINCT geo FROM finance_entries WHERE geo IS NOT NULL").fetchall()}
     finally:
         conn.close()
 
-    rows = _lead_rows(leads, rules, account_money)
+    geos = sorted({x["geo"] for x in leads} | entry_geos)
+    all_rows = _lead_rows(leads, rules, account_money)
+    rows = [r for r in all_rows if r["geo"] == geo] if geo else all_rows
+    if geo:
+        entries = [e for e in entries if e["geo"] == geo]
     out = []
     for m in month_list:
         manual = {}
@@ -4641,10 +4700,10 @@ def profit_and_loss(months: int = 6, x_telegram_username: str = Depends(current_
     total_inc = sum(r["income_total"] for r in out)
     total_exp = sum(r["expense_total"] for r in out)
     countries = {}
-    for r in rows:
+    for r in all_rows:
         if r["ftd_month"] and r["country"]:
             countries[_country_key(r["country"])] = countries.get(_country_key(r["country"]), 0) + 1
-    return {"months": out, "rules": rules, "categories": FINANCE_CATEGORIES,
+    return {"months": out, "rules": rules, "categories": FINANCE_CATEGORIES, "geo": geo, "geos": geos,
             "countries": sorted(({"country": k, "ftd": v} for k, v in countries.items()), key=lambda c: -c["ftd"]),
             "total": {"income": round(total_inc, 2), "expense": round(total_exp, 2), "profit": round(total_inc - total_exp, 2),
                       "ftd": sum(r["ftd"] for r in out),
@@ -4678,7 +4737,7 @@ def _account_deposits_by_month(conn):
 
 
 @app.get("/api/v1/cohorts")
-def cohorts(months: int = 6, x_telegram_username: str = Depends(current_username)):
+def cohorts(months: int = 6, geo: str = "", x_telegram_username: str = Depends(current_username)):
     """Cohorts by the month a lead came in: funnel, traffic of that month, CPA revenue and ROI,
     plus how FTDs, deposits and CPA revenue accumulate month by month after the lead came."""
     conn = db()
@@ -4687,7 +4746,8 @@ def cohorts(months: int = 6, x_telegram_username: str = Depends(current_username
         month_list = _finance_months(conn, months)
         rules = finance_rules(conn)
         leads = build_leads(conn, {"role": "admin", "username": "system"})
-        traffic = _traffic_by_month(conn)
+        geo = clean_geo(geo)
+        traffic = _traffic_by_month(conn, geo, _campaign_geos(leads))
         account_money = _account_deposits_by_month(conn)
     finally:
         conn.close()
@@ -4697,6 +4757,8 @@ def cohorts(months: int = 6, x_telegram_username: str = Depends(current_username
     groups = {m: {"month": m, "leads": 0, "reg": 0, "ftd": 0, "cpa": 0.0, "deposits": 0.0,
                   "ftd_by": [0] * width, "cpa_by": [0.0] * width, "dep_by": [0.0] * width} for m in month_list}
     for r in _lead_rows(leads, rules, account_money):
+        if geo and r["geo"] != geo:
+            continue
         g = groups.get(r["lead_month"])
         if not g or not r["lead_month"]:
             continue
@@ -4738,7 +4800,7 @@ def cohorts(months: int = 6, x_telegram_username: str = Depends(current_username
             "deposits_cum": cum(g["dep_by"]),
             "roi_cum": [None if v is None else (round((v - spend) / spend * 100, 1) if spend else None) for v in cum_cpa],
         })
-    return {"cohorts": out, "width": width, "rules": rules}
+    return {"cohorts": out, "width": width, "rules": rules, "geo": geo}
 
 
 @app.get("/api/v1/finance/entries")
@@ -4771,8 +4833,8 @@ def add_finance_entry(payload: FinanceEntry, x_telegram_username: str = Depends(
             raise HTTPException(status_code=400, detail="Сумма должна быть больше нуля")
         row_id = uuid.uuid4().hex
         conn.execute(
-            "INSERT INTO finance_entries(id, month, kind, category, amount, lots, comment, created_at, created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-            (row_id, payload.month, payload.kind, payload.category, round(float(amount), 2), lots,
+            "INSERT INTO finance_entries(id, month, kind, category, amount, lots, geo, comment, created_at, created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (row_id, payload.month, payload.kind, payload.category, round(float(amount), 2), lots, clean_geo(payload.geo),
              (payload.comment or "").strip()[:300] or None, datetime.utcnow().isoformat(), admin),
         )
         conn.commit()
