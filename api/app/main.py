@@ -3499,7 +3499,7 @@ def stats_overview(days: int = 7, x_telegram_username: str = Depends(current_use
         accs = x.get("matched_accounts") or []
         rank = STAGE_ORDER.get(x["stage"], 0)
         has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
-        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs])
+        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at"))
         is_reg = bool(reg_day) or rank >= STAGE_ORDER["REG"] or bool(accs)
         ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
         is_ftd = bool(ftd_day) or rank >= STAGE_ORDER["FTD"] or has_dep
@@ -3834,7 +3834,7 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
         rank = STAGE_ORDER.get(x["stage"], 0)
         has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
         lead_day = _stat_day(x.get("first_seen_at"))
-        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or (lead_day if (rank >= 1 or accs) else None)
+        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at")) or (lead_day if (rank >= 1 or accs) else None)
         ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
         dialog = bool(x.get("dialog_at")) or bool(reg_day) or bool(ftd_day)
         key, label = group_key(x.get("campaign") or "Без кампании", x.get("adset") or "", x.get("ad") or "")
@@ -4978,12 +4978,15 @@ def require_buyer_access(username, conn):
 
 
 def lead_funnel_days(x):
-    """Lead, registration and first-deposit days of a lead plus its deposit sum (same rules as the buying stats)."""
+    """Lead, registration and first-deposit days of a lead plus its deposit sum (same rules as the buying stats).
+
+    A deposit marked in Chatterfy without a REG step means the client had registered by then,
+    so the FTD day stands in for the registration day rather than the day the lead came."""
     accs = x.get("matched_accounts") or []
     rank = STAGE_ORDER.get(x["stage"], 0)
     has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
     lead_day = _stat_day(x.get("first_seen_at"))
-    reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or (lead_day if (rank >= 1 or accs) else None)
+    reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at")) or (lead_day if (rank >= 1 or accs) else None)
     ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
     deposit = sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
     return lead_day, reg_day, ftd_day, deposit if ftd_day else 0.0
