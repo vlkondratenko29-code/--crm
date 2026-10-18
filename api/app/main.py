@@ -25,6 +25,7 @@ from . import brokers as broker_lib
 from . import watch as watch_lib
 from . import facebook as fb_lib
 from . import coach as coach_lib
+from . import brief as brief_lib
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
@@ -2917,6 +2918,42 @@ def lead_detail(lead_key: str, x_telegram_username: str = Depends(current_userna
     lead["events"] = sorted(seen_types.values(), key=lambda x: STAGE_ORDER.get(x["type"], 9))
     lead["note_list"] = [dict(n) for n in notes]
     return lead
+
+
+LEAD_BRIEF_MESSAGES = 200    # messages read per chat for the lead description
+
+
+@app.get("/api/v1/leads/{lead_key:path}/brief")
+def lead_dialog_brief(lead_key: str, x_telegram_username: str = Depends(current_username)):
+    """Short description of the lead from its Chatterfy dialog (no AI: keywords and funnel steps)."""
+    conn = db()
+    try:
+        user = require_lead_access(x_telegram_username, conn)
+        lead = next((x for x in build_leads(conn, user) if x["lead_key"] == lead_key), None)
+        if not lead:
+            raise HTTPException(status_code=404, detail="Lead not found")
+        key = watch_key(conn)
+        if not key:
+            raise HTTPException(status_code=400, detail="Нет ключа Chatterfy — админ добавляет его во вкладке «Контроль»")
+        client = watch_lib.Chatterfy(key)
+        names = _sender_names(conn, client)
+    finally:
+        conn.close()
+    messages = []
+    try:
+        for cid in lead["chat_ids"][:3]:
+            for m in client.messages(cid, LEAD_BRIEF_MESSAGES):
+                if m.get("sender_type") != "outcoming":
+                    role, who = "client", "Клиент"
+                elif m.get("sender"):
+                    role, who = "staff", names.get(m.get("sender"), "оператор")
+                else:
+                    role, who = "bot", "Бот/AI"
+                messages.append({"at": m.get("created_at"), "role": role, "who": who,
+                                 "text": (m.get("content") or "").strip() or "[вложение/медиа]"})
+    except watch_lib.ChatterfyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return brief_lib.lead_brief(messages, _fmt_ts)
 
 
 

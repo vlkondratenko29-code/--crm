@@ -523,3 +523,13 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .review-finding blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #3a4a60;color:#c9d2df;word-break:break-word;white-space:pre-wrap}
 .review-finding p{margin:6px 0 0;color:#c9d2df}
 .review-better{color:#a9e3bf!important}
+/* Lead card: description from the dialog */
+.lead-brief{display:flex;flex-direction:column;gap:10px}
+.lead-brief-summary{margin:0;padding:10px 12px;border-radius:12px;background:#0d131b;border:1px solid #222d3b;font-size:13px;line-height:1.45;color:#dbe3ee}
+.lead-brief-summary.brief-waiting{border-color:#6b3a33}
+.lead-brief-summary.brief-silent{border-color:#5c4c25}
+.lead-brief-list{display:flex;flex-direction:column;gap:6px}
+.lead-brief-list>small{color:#7f8b9e;font-size:11px;text-transform:uppercase;font-weight:600}
+.lead-brief-list>div{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:12px;color:#c9d2df;word-break:break-word}
+.lead-brief-list q{quotes:"«" "»"}
+.lead-brief-list>div small{color:#7f8b9e;font-size:11px}

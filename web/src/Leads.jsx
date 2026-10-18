@@ -133,6 +133,38 @@ export default function Leads({ username, role }) {
   );
 }
 
+// What the dialog says about the lead: who talks to them, what they asked, money / trust / timing, where it stands.
+function DialogBrief({ path, username }) {
+  const [brief, setBrief] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setBrief(null); setError("");
+    api(path + "/brief", { username, timeout: 45000 }).then(setBrief).catch(e => setError(e.message));
+  }, [path, username]);
+  if (error) return <><div className="section-title">Из диалога</div><p className="recon-hint">{error}</p></>;
+  if (!brief) return <><div className="section-title">Из диалога</div><p className="subtitle">Читаю чат…</p></>;
+  return (
+    <div className="lead-brief">
+      <div className="section-title">Из диалога</div>
+      <p className={"lead-brief-summary brief-" + (brief.state_kind || "ok")}>{brief.summary}</p>
+      {brief.facts.length > 0 && <div className="client-grid">
+        {brief.facts.map(f => <React.Fragment key={f.label}><span>{f.label}</span><b>{f.value}</b></React.Fragment>)}
+      </div>}
+      {brief.topics.length > 0 && <div className="lead-brief-list">
+        {brief.topics.map(t => <div key={t.key}><span className="st-badge">{t.title}</span><q>{t.quote}</q></div>)}
+      </div>}
+      {brief.questions.length > 0 && <div className="lead-brief-list">
+        <small>Вопросы клиента</small>
+        {brief.questions.map((q, i) => <div key={i}><q>{q.quote}</q><small>{shortDate(q.at)}</small></div>)}
+      </div>}
+      {brief.last_client && <div className="lead-brief-list">
+        <small>Последнее от клиента · {shortDate(brief.last_client.at)}</small>
+        <div><q>{brief.last_client.quote}</q></div>
+      </div>}
+    </div>
+  );
+}
+
 export function LeadCard({ leadKey, username, canAssign, team, onBack, backLabel = "← Все лиды" }) {
   const [lead, setLead] = useState(null);
   const [error, setError] = useState("");
@@ -196,6 +228,7 @@ export function LeadCard({ leadKey, username, canAssign, team, onBack, backLabel
             <span>{a.deposits != null ? "$" + Number(a.deposits).toFixed(0) : ""}</span>
           </div>)}</div>
         </>}
+        {lead.chat_ids?.length > 0 && <DialogBrief path={path} username={username} />}
         {lead.chat_link && <a className="chat-link" href={lead.chat_link} target="_blank" rel="noreferrer">Открыть чат в Chatterfy ↗</a>}
 
         <div className="section-title">Обработка</div>
