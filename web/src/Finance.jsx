@@ -302,6 +302,123 @@ function Digest({ username }) {
   );
 }
 
+// When the traffic was bought, when the lead deposited and how long it took: time to FTD,
+// cohorts by lead week and by campaign, and the leads with no campaign.
+const WEEK_PERIODS = [["8", "8 нед"], ["12", "12 нед"], ["26", "26 нед"]];
+const dayLabel = d => d ? new Date(d + "T00:00:00").toLocaleDateString("ru-RU", { day: "2-digit", month: "short" }) : "—";
+const daysText = v => v == null ? "—" : v + " дн";
+
+function TimeToFtd({ t }) {
+  const max = Math.max(1, ...t.buckets.map(b => b.count));
+  return <>
+    <div className="st-kpis">
+      <div><span>Медиана</span><b>{daysText(t.median)}</b><small>лид → FTD</small></div>
+      <div><span>В среднем</span><b>{daysText(t.avg)}</b><small>75% FTD — за {daysText(t.p75)}</small></div>
+      <div><span>Лид → рега</span><b>{daysText(t.lead_to_reg)}</b><small>медиана у FTD</small></div>
+      <div><span>Рега → FTD</span><b>{daysText(t.reg_to_ftd)}</b><small>медиана</small></div>
+    </div>
+    <div className="ttf-bars">{t.buckets.map(b => <div key={b.label}>
+      <span>{b.label}</span>
+      <div className="ttf-track"><div className="ttf-fill" style={{ width: (b.count / max * 100) + "%" }} /></div>
+      <b>{b.count}</b>
+    </div>)}</div>
+    <p className="recon-hint">Считается по {t.with_date} FTD из {t.ftd}, у которых известна дата депозита (событие Chatterfy или отчёт FxPro).
+      {t.ftd > t.with_date ? ` У ${t.ftd - t.with_date} FTD даты нет — они в счёт времени не входят.` : ""}</p>
+  </>;
+}
+
+function WeeklyCohorts({ data }) {
+  const rows = data.weekly.filter(w => w.leads);
+  const cols = Math.max(1, ...rows.map(w => w.ftd_pct_cum.filter(v => v != null).length));
+  return <>
+    <div className="st-list pnl-grid">
+      {rows.slice().reverse().map(w => <div className="buy-row" key={w.week}>
+        <div className="buy-head"><div><b>Неделя {dayLabel(w.week)} – {dayLabel(w.week_end)}</b>
+          <small>{w.leads} лидов · {w.reg} REG · {w.ftd} FTD ({pct(w.lead_to_ftd)}) · до FTD {daysText(w.median_days)}</small></div>
+          <b className={tone(w.roi)}>{pct(w.roi)}</b></div>
+        <div className="buy-grid">
+          <span className="t-money">{money(w.spend)}<small>трафик недели</small></span>
+          <span>{money(w.cpl)}<small>цена лида</small></span>
+          <span>{money(w.cost_per_ftd)}<small>цена FTD</small></span>
+          <span className="t-ftd">{money(w.cpa_revenue)}<small>CPA (расчёт)</small></span>
+          <span>{daysText(w.median_days)}<small>медиана до FTD</small></span>
+        </div>
+      </div>)}
+      {!rows.length && <div className="empty-state">Лидов за период нет.</div>}
+    </div>
+    {rows.length > 0 && <>
+      <div className="section-title">Лид → FTD по неделям жизни, накопительно</div>
+      <div className="cohort-scroll"><table className="cohort-table">
+        <thead><tr><th>Неделя</th><th>Лиды</th>{Array.from({ length: cols }, (_, i) => <th key={i}>W{i}</th>)}</tr></thead>
+        <tbody>{rows.map(w => <tr key={w.week}><th>{dayLabel(w.week)}</th><td>{w.leads}</td>
+          {w.ftd_pct_cum.slice(0, cols).map((v, i) => <td key={i} className={v ? "t-ftd" : ""}>{v == null ? "" : v + "%"}</td>)}</tr>)}</tbody>
+      </table></div>
+      <p className="recon-hint">W0 — неделя, когда пришёл лид (пн–вс), W1 — следующая и т.д. Трафик недели — расход всех кампаний за эти дни (большее из отчётов баеров и Ads Manager).</p>
+    </>}
+  </>;
+}
+
+function CampaignCohorts({ data }) {
+  const rows = data.campaigns;
+  return <>
+    <div className="cohort-scroll"><table className="cohort-table camp-table">
+      <thead><tr><th>Кампания</th><th>Трафик</th><th>Лиды</th><th>Цена лида</th><th>REG</th><th>FTD</th><th>Лид→FTD</th><th>Цена FTD</th><th>CPA</th><th>ROI</th><th>До FTD</th></tr></thead>
+      <tbody>{rows.map(c => <tr key={c.campaign}>
+        <th title={c.campaign}>{c.campaign}{c.organic && <small> · без трафика</small>}</th>
+        <td className="t-money">{c.spend ? money(c.spend) : "—"}</td><td>{c.leads}</td><td>{money(c.cpl)}</td>
+        <td>{c.reg}</td><td className={c.ftd ? "t-ftd" : ""}>{c.ftd}</td><td>{pct(c.lead_to_ftd)}</td>
+        <td>{money(c.cost_per_ftd)}</td><td className="t-ftd">{c.cpa_revenue ? money(c.cpa_revenue) : "—"}</td>
+        <td className={tone(c.roi)}>{pct(c.roi)}</td><td>{daysText(c.median_days)}</td>
+      </tr>)}</tbody>
+    </table></div>
+    {!rows.length && <div className="empty-state">Кампаний за период нет.</div>}
+    <p className="recon-hint">Лиды — пришедшие за период по метке кампании из ссылки. Трафик — расход этой кампании за тот же период. Если при расходе лидов 0, проверь, что название кампании в рекламе совпадает с меткой (utm_campaign) в ссылке на бота.</p>
+  </>;
+}
+
+function NoCampaign({ data }) {
+  const n = data.no_campaign;
+  return <>
+    <div className="st-kpis">
+      <div><span>Без кампании</span><b className={n.count ? "t-bad" : "t-ftd"}>{n.count}</b><small>{pct(n.share)} всех лидов</small></div>
+      <div><span>Из них FTD</span><b>{n.ftd}</b><small>доход не привязан к трафику</small></div>
+    </div>
+    <p className="recon-hint">У этих лидов нет метки кампании: CRM не знает, с какой рекламы они пришли, и не может посчитать их в окупаемости. Обычно так бывает, когда в ссылке на бота нет utm-меток или click id, или человек зашёл в бота напрямую.</p>
+    <div className="st-list">{n.leads.map(l => <div className="st-row" key={l.lead_key}>
+      <div className="st-row-main"><b>{l.name || (l.tg_username ? "@" + l.tg_username : "") || l.email || l.lead_key}</b><small>{dayLabel(l.lead_day)} · {l.stage}</small></div>
+      <small className="no-camp-meta">{l.source ? "источник: " + l.source : "источник не указан"}{l.click_id ? " · click id есть" : " · без click id"}
+        {l.chat_link && <> · <a href={l.chat_link} target="_blank" rel="noreferrer">чат</a></>}</small>
+    </div>)}</div>
+    {n.count > n.leads.length && <p className="recon-hint">Показаны последние {n.leads.length} из {n.count}.</p>}
+  </>;
+}
+
+function CohortsMore({ username, geo }) {
+  const [weeks, setWeeks] = useState("12");
+  const [tab, setTab] = useState("ttf");
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setData(null); setError("");
+    api(`/api/v1/cohorts/weekly?weeks=${weeks}&geo=${geo}`, { username, timeout: 90000 }).then(setData).catch(e => setError(e.message));
+  }, [weeks, geo, username]);
+  return <div className="cohorts-more">
+    <div className="section-title">Время до FTD, недели и кампании</div>
+    <div className="period-switch">{WEEK_PERIODS.map(([v, l]) => <button key={v} className={weeks === v ? "selected" : ""} onClick={() => setWeeks(v)}>{l}</button>)}</div>
+    <div className="st-tabs">{[["ttf", "Время до FTD"], ["weeks", "По неделям"], ["campaigns", "По кампаниям"], ["none", "Без кампании"]].map(([k, l]) =>
+      <button key={k} className={tab === k ? "selected" : ""} onClick={() => setTab(k)}>{l}{k === "none" && data?.no_campaign.count ? ` · ${data.no_campaign.count}` : ""}</button>)}</div>
+    {error && <div className="team-message">{error}</div>}
+    {!data && !error && <p className="subtitle">Считаю…</p>}
+    {data && <>
+      <p className="recon-hint">Лиды с {dayLabel(data.start)} по {dayLabel(data.end)}: {data.leads}.</p>
+      {tab === "ttf" && <TimeToFtd t={data.time_to_ftd} />}
+      {tab === "weeks" && <WeeklyCohorts data={data} />}
+      {tab === "campaigns" && <CampaignCohorts data={data} />}
+      {tab === "none" && <NoCampaign data={data} />}
+    </>}
+  </div>;
+}
+
 export default function Finance({ username }) {
   const [view, setView] = useState("pnl");
   const [months, setMonths] = useState("6");
@@ -345,6 +462,7 @@ export default function Finance({ username }) {
       {view === "pnl" && pnl && <div className="st-list pnl-grid">{pnl.months.slice().reverse().map(m => <MonthPnl key={m.month} m={m} username={username} />)}
         <p className="recon-hint">CPA (расчёт) — по месяцу FTD, по сетке FxPro: тир страны × сумма депозитов клиента за месяц FTD. IB — лоты × ставка, вносится во вкладке «Внести». Трафик за день берётся по большему из двух источников: отчёты баеров или Ads Manager, чтобы не считать дважды.</p></div>}
       {view === "cohorts" && cohorts && <Cohorts data={cohorts} />}
+      {view === "cohorts" && <CohortsMore username={username} geo={geo} />}
       {view === "entries" && <Entries username={username} rules={pnl?.rules} countries={pnl?.countries} geos={pnl?.geos || []} onChanged={load} />}
       {!pnl && !error && view !== "entries" && <p className="subtitle">Считаю… первый раз может занять до минуты.</p>}
     </section>

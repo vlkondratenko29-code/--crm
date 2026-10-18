@@ -5552,6 +5552,190 @@ def cohorts(months: int = 6, geo: str = "", x_telegram_username: str = Depends(c
     return {"cohorts": out, "width": width, "rules": rules, "geo": geo}
 
 
+# Time to FTD, weekly and campaign cohorts: when the traffic was bought, when the lead deposited, how long it took.
+COHORT_MAX_WEEKS = 26
+TTF_BUCKETS = ((0, 0, "В тот же день"), (1, 3, "1–3 дня"), (4, 7, "4–7 дней"), (8, 14, "8–14 дней"),
+               (15, 30, "15–30 дней"), (31, None, "31+ день"))
+
+
+def _days_between(a, b):
+    da, db_ = _parse_day(a), _parse_day(b)
+    return (db_ - da).days if da and db_ else None
+
+
+def _median(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    mid = len(xs) // 2
+    return float(xs[mid]) if len(xs) % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def _ttf_summary(rows):
+    """Days lead -> FTD over leads whose FTD date is known."""
+    days = [r["days_to_ftd"] for r in rows if r["days_to_ftd"] is not None]
+    buckets = [{"label": label, "count": sum(1 for d in days if d >= lo and (hi is None or d <= hi))}
+               for lo, hi, label in TTF_BUCKETS]
+    return {
+        "ftd": sum(1 for r in rows if r["ftd_day"]), "with_date": len(days),
+        "median": _median(days), "avg": round(sum(days) / len(days), 1) if days else None,
+        "p75": float(sorted(days)[int(len(days) * 0.75)]) if days else None,
+        "lead_to_reg": _median([r["days_to_reg"] for r in rows if r["ftd_day"]]),
+        "reg_to_ftd": _median([r["reg_to_ftd"] for r in rows]),
+        "buckets": buckets,
+    }
+
+
+def _traffic_by_campaign(conn, start, end):
+    """campaign key -> (name, spend) over [start, end]; per day the larger of buyer reports and Ads Manager."""
+    def by_day(table):
+        out = {}
+        for r in conn.execute(f"SELECT day, campaign, SUM(spend) AS spend FROM {table} WHERE day>=%s AND day<=%s "
+                              "GROUP BY day, campaign", (start, end)).fetchall():
+            k = (r["day"], _key(r["campaign"]))
+            out[k] = (r["campaign"], out.get(k, (None, 0.0))[1] + float(r["spend"] or 0))
+        return out
+    reports, ads = by_day("buyer_reports"), by_day("ad_spend")
+    out = {}
+    for k in set(reports) | set(ads):
+        name = (ads.get(k) or reports.get(k))[0]
+        spend = max(reports.get(k, (None, 0.0))[1], ads.get(k, (None, 0.0))[1])
+        prev = out.get(k[1], (name, 0.0))
+        out[k[1]] = (prev[0] or name, prev[1] + spend)
+    return out
+
+
+@app.get("/api/v1/cohorts/weekly")
+def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = Depends(current_username)):
+    """Leads of the last `weeks` weeks: time to FTD, cohorts by the week the lead came, cohorts by campaign
+    (with that campaign's spend), and the leads the CRM could not tie to any campaign."""
+    weeks = max(1, min(int(weeks or 12), COHORT_MAX_WEEKS))
+    geo = clean_geo(geo)
+    today = (datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).date()
+    this_monday = today - timedelta(days=today.weekday())
+    first_monday = this_monday - timedelta(weeks=weeks - 1)
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        since = data_since(conn) or ""
+        start = max(first_monday.isoformat(), since[:10])
+        first_monday = max(first_monday, _parse_day(start) - timedelta(days=_parse_day(start).weekday()))
+        rules = finance_rules(conn)
+        leads = build_leads(conn, {"role": "admin", "username": "system"})
+        campaign_geos = _campaign_geos(leads)
+        traffic_day = _traffic_by_day(conn, geo, campaign_geos)
+        traffic_campaign = _traffic_by_campaign(conn, start, today.isoformat())
+        account_money = _account_deposits_by_month(conn)
+    finally:
+        conn.close()
+
+    cpa_of = {r["lead_key"]: r["cpa"] for r in _lead_rows(leads, rules, account_money)}
+    rows = []
+    for x in leads:
+        if geo and x["geo"] != geo:
+            continue
+        lead_day, reg_day, ftd_day, deposit = lead_funnel_days(x)
+        if not lead_day or lead_day < start:
+            continue
+        accs = x.get("matched_accounts") or []
+        # The real FTD date (Chatterfy event or the broker report). Without it ftd_day falls back to the lead day,
+        # which would show a false «same day», so such FTDs count but stay out of the timing.
+        ftd_known = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
+        reg_known = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs])
+        rows.append({
+            "lead_key": x["lead_key"], "lead_day": lead_day, "reg": bool(reg_day), "ftd_day": ftd_day,
+            "days_to_ftd": _days_between(lead_day, ftd_known) if ftd_known else None,
+            "days_to_reg": _days_between(lead_day, reg_known) if reg_known else None,
+            "reg_to_ftd": _days_between(reg_known, ftd_known) if reg_known and ftd_known else None,
+            "deposit": deposit, "cpa": cpa_of.get(x["lead_key"], 0.0),
+            "campaign": x.get("campaign") or "", "source": x.get("source"), "x": x,
+        })
+    for r in rows:  # a negative gap means the dates come from different sources: treat as same day
+        for k in ("days_to_ftd", "days_to_reg", "reg_to_ftd"):
+            if r[k] is not None and r[k] < 0:
+                r[k] = 0
+
+    # Cohorts by week of the lead: W0 = the week the lead came in.
+    week_list = []
+    d = first_monday
+    while d <= this_monday:
+        week_list.append(d)
+        d += timedelta(weeks=1)
+    width = len(week_list)
+    out_weeks = []
+    for i, monday in enumerate(week_list):
+        sunday = monday + timedelta(days=6)
+        w_rows = [r for r in rows if monday.isoformat() <= r["lead_day"] <= sunday.isoformat()]
+        spend = sum(v for day, v in traffic_day.items() if monday.isoformat() <= day <= sunday.isoformat())
+        age = width - i
+        ftd_by = [0] * width
+        for r in w_rows:
+            if r["ftd_day"]:
+                off = (_parse_day(r["ftd_day"]) - monday).days // 7 if _parse_day(r["ftd_day"]) else 0
+                ftd_by[min(max(off, 0), age - 1)] += 1
+        n, ftd = len(w_rows), sum(1 for r in w_rows if r["ftd_day"])
+        cpa = sum(r["cpa"] for r in w_rows)
+        cum, acc = [], 0
+        for k in range(width):
+            acc += ftd_by[k]
+            cum.append((round(acc / n * 100, 1) if n else 0) if k < age else None)
+        out_weeks.append({
+            "week": monday.isoformat(), "week_end": sunday.isoformat(), "leads": n,
+            "reg": sum(1 for r in w_rows if r["reg"]), "ftd": ftd,
+            "lead_to_ftd": round(ftd / n * 100, 1) if n else None,
+            "spend": round(spend, 2), "cpl": round(spend / n, 2) if n else None,
+            "cost_per_ftd": round(spend / ftd, 2) if ftd else None,
+            "cpa_revenue": round(cpa, 2), "roi": round((cpa - spend) / spend * 100, 1) if spend else None,
+            "median_days": _median([r["days_to_ftd"] for r in w_rows]), "ftd_pct_cum": cum,
+        })
+
+    # Cohorts by campaign over the same period, with the campaign's own spend.
+    camps = {}
+    for r in rows:
+        if not r["campaign"]:
+            continue
+        c = camps.setdefault(_key(r["campaign"]), {"campaign": r["campaign"], "rows": []})
+        c["rows"].append(r)
+    for k, (name, spend) in traffic_campaign.items():
+        if geo and campaign_geos.get(k) != geo:
+            continue
+        camps.setdefault(k, {"campaign": name, "rows": []})
+    out_camps = []
+    for k, c in camps.items():
+        c_rows = c["rows"]
+        spend = traffic_campaign.get(k, (None, 0.0))[1]
+        n, ftd = len(c_rows), sum(1 for r in c_rows if r["ftd_day"])
+        cpa = sum(r["cpa"] for r in c_rows)
+        out_camps.append({
+            "campaign": c["campaign"], "organic": c["campaign"].startswith("Канал ·"), "leads": n,
+            "reg": sum(1 for r in c_rows if r["reg"]), "ftd": ftd,
+            "lead_to_ftd": round(ftd / n * 100, 1) if n else None,
+            "spend": round(spend, 2), "cpl": round(spend / n, 2) if n and spend else None,
+            "cost_per_ftd": round(spend / ftd, 2) if ftd and spend else None,
+            "cpa_revenue": round(cpa, 2), "roi": round((cpa - spend) / spend * 100, 1) if spend else None,
+            "median_days": _median([r["days_to_ftd"] for r in c_rows]),
+            "first_lead": min((r["lead_day"] for r in c_rows), default=None),
+        })
+    out_camps.sort(key=lambda c: (-c["spend"], -c["leads"]))
+
+    no_campaign = [r for r in rows if not r["campaign"]]
+    no_campaign.sort(key=lambda r: r["lead_day"], reverse=True)
+    return {
+        "geo": geo, "weeks": weeks, "start": start, "end": today.isoformat(),
+        "leads": len(rows), "time_to_ftd": _ttf_summary(rows),
+        "weekly": out_weeks, "width": width,
+        "campaigns": out_camps,
+        "no_campaign": {
+            "count": len(no_campaign), "share": round(len(no_campaign) / len(rows) * 100, 1) if rows else None,
+            "ftd": sum(1 for r in no_campaign if r["ftd_day"]),
+            "leads": [{"lead_key": r["lead_key"], "name": r["x"].get("name"), "tg_username": r["x"].get("tg_username"),
+                       "email": r["x"].get("email"), "lead_day": r["lead_day"], "stage": r["x"]["stage"],
+                       "source": r["source"], "click_id": r["x"].get("click_id"), "chat_link": r["x"].get("chat_link")}
+                      for r in no_campaign[:200]],
+        },
+    }
+
+
 @app.get("/api/v1/finance/entries")
 def list_finance_entries(month: str = "", x_telegram_username: str = Depends(current_username)):
     month = month or _current_month()
