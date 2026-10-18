@@ -342,6 +342,10 @@ function WeeklyCohorts({ data }) {
           <span>{money(w.cost_per_ftd)}<small>цена FTD</small></span>
           <span className="t-ftd">{money(w.cpa_revenue)}<small>CPA (расчёт)</small></span>
           <span>{daysText(w.median_days)}<small>медиана до FTD</small></span>
+          <span className="t-money">{money(w.deposits)}<small>депозиты</small></span>
+          <span>{money(w.avg_ftd)}<small>средний FTD</small></span>
+          <span className="t-ftd">{money(w.redep)}<small>передепы ({w.redep_clients})</small></span>
+          <span>{money(w.per_lead)}<small>деп на лида</small></span>
         </div>
       </div>)}
       {!rows.length && <div className="empty-state">Лидов за период нет.</div>}
@@ -362,13 +366,15 @@ function CampaignCohorts({ data }) {
   const rows = data.campaigns;
   return <>
     <div className="cohort-scroll"><table className="cohort-table camp-table">
-      <thead><tr><th>Кампания</th><th>Трафик</th><th>Лиды</th><th>Цена лида</th><th>REG</th><th>FTD</th><th>Лид→FTD</th><th>Цена FTD</th><th>CPA</th><th>ROI</th><th>До FTD</th></tr></thead>
+      <thead><tr><th>Кампания</th><th>Трафик</th><th>Лиды</th><th>Цена лида</th><th>REG</th><th>FTD</th><th>Лид→FTD</th><th>Цена FTD</th><th>CPA</th><th>ROI</th><th>До FTD</th><th>Депозиты</th><th>Ср. FTD</th><th>Передепы</th><th>Деп/лид</th></tr></thead>
       <tbody>{rows.map(c => <tr key={c.campaign}>
         <th title={c.campaign}>{c.campaign}{c.organic && <small> · без трафика</small>}</th>
         <td className="t-money">{c.spend ? money(c.spend) : "—"}</td><td>{c.leads}</td><td>{money(c.cpl)}</td>
         <td>{c.reg}</td><td className={c.ftd ? "t-ftd" : ""}>{c.ftd}</td><td>{pct(c.lead_to_ftd)}</td>
         <td>{money(c.cost_per_ftd)}</td><td className="t-ftd">{c.cpa_revenue ? money(c.cpa_revenue) : "—"}</td>
         <td className={tone(c.roi)}>{pct(c.roi)}</td><td>{daysText(c.median_days)}</td>
+        <td className="t-money">{c.deposits ? money(c.deposits) : "—"}</td><td>{money(c.avg_ftd)}</td>
+        <td className={c.redep ? "t-ftd" : ""}>{c.redep ? `${money(c.redep)} (${c.redep_clients})` : "—"}</td><td>{money(c.per_lead)}</td>
       </tr>)}</tbody>
     </table></div>
     {!rows.length && <div className="empty-state">Кампаний за период нет.</div>}
@@ -393,6 +399,43 @@ function NoCampaign({ data }) {
   </>;
 }
 
+function Deposits({ data }) {
+  const d = data.deposits;
+  const max = Math.max(1, ...d.ftd_buckets.map(b => b.count));
+  return <>
+    <div className="st-kpis">
+      <div><span>Депозиты</span><b className="t-money">{money(d.deposits)}</b><small>{d.ftd} FTD за период</small></div>
+      <div><span>Средний FTD</span><b>{money(d.avg_ftd)}</b><small>по {d.ftd_with_amount} FTD с суммой</small></div>
+      <div><span>Передепы</span><b className="t-ftd">{money(d.redep)}</b><small>{d.redep_clients} клиентов ({pct(d.redep_share)} FTD)</small></div>
+      <div><span>На лида</span><b>{money(d.per_lead)}</b><small>депозитов на 1 лид</small></div>
+    </div>
+    <div className="section-title">Размер первого депа</div>
+    <div className="ttf-bars">{d.ftd_buckets.map(b => <div key={b.label}>
+      <span>{b.label}</span>
+      <div className="ttf-track"><div className="ttf-fill" style={{ width: (b.count / max * 100) + "%" }} /></div>
+      <b>{b.count}</b>
+    </div>)}</div>
+
+    <div className="section-title">Добрать до следующего порога CPA · {monthLabel(d.topup_month)}</div>
+    <p className="recon-hint">FTD этого месяца, которым до следующей ступени сетки CPA не хватает до $600. CPA считается по всем депам клиента за месяц FTD — довнос до конца месяца поднимает выплату.</p>
+    <div className="st-list">{d.topup.map(t => <div className="st-row" key={t.lead_key}>
+      <div className="st-row-main"><b>{t.name || t.lead_key}</b><small>FTD {dayLabel(t.ftd_day)}{t.assignee ? " · @" + t.assignee : ""}</small></div>
+      <div className="st-row-nums">
+        <span className="t-money">{money(t.month_amount)}<small>внёс за месяц</small></span>
+        <span className="t-bad">{money(t.missing)}<small>не хватает</small></span>
+        <span className="t-ftd">+{money(t.cpa_gain)}<small>к CPA</small></span>
+        <span>{money(t.cpa_next)}<small>CPA после</small></span>
+      </div>
+      {t.chat_link && <a className="topup-link" href={t.chat_link} target="_blank" rel="noreferrer">Открыть чат</a>}
+    </div>)}</div>
+    {!d.topup.length && <div className="empty-state">Сейчас никому из FTD этого месяца не нужно добирать до порога (или FTD в этом месяце ещё нет).</div>}
+
+    <p className="recon-hint">Откуда суммы: отчёт FxPro — у {d.sources["FxPro"]} FTD, сумма из Chatterfy — у {d.sources["Chatterfy"]}, «Депы и ЗП» (подтверждённые депы обработчиков) — у {d.sources["Депы и ЗП"]}.
+      Берётся наибольшая сумма из источников, чтобы ничего не посчитать дважды.{d.no_amount ? ` У ${d.no_amount} FTD суммы нет ни в одном источнике.` : ""}{" "}
+      Депы обработчиков привязываются к лиду по тому, что написано в поле «Клиент»: почта, @ник, UID или номер счёта.</p>
+  </>;
+}
+
 function CohortsMore({ username, geo }) {
   const [weeks, setWeeks] = useState("12");
   const [tab, setTab] = useState("ttf");
@@ -405,13 +448,14 @@ function CohortsMore({ username, geo }) {
   return <div className="cohorts-more">
     <div className="section-title">Время до FTD, недели и кампании</div>
     <div className="period-switch">{WEEK_PERIODS.map(([v, l]) => <button key={v} className={weeks === v ? "selected" : ""} onClick={() => setWeeks(v)}>{l}</button>)}</div>
-    <div className="st-tabs">{[["ttf", "Время до FTD"], ["weeks", "По неделям"], ["campaigns", "По кампаниям"], ["none", "Без кампании"]].map(([k, l]) =>
+    <div className="st-tabs">{[["ttf", "Время до FTD"], ["deposits", "Депозиты"], ["weeks", "По неделям"], ["campaigns", "По кампаниям"], ["none", "Без кампании"]].map(([k, l]) =>
       <button key={k} className={tab === k ? "selected" : ""} onClick={() => setTab(k)}>{l}{k === "none" && data?.no_campaign.count ? ` · ${data.no_campaign.count}` : ""}</button>)}</div>
     {error && <div className="team-message">{error}</div>}
     {!data && !error && <p className="subtitle">Считаю…</p>}
     {data && <>
       <p className="recon-hint">Лиды с {dayLabel(data.start)} по {dayLabel(data.end)}: {data.leads}.</p>
       {tab === "ttf" && <TimeToFtd t={data.time_to_ftd} />}
+      {tab === "deposits" && <Deposits data={data} />}
       {tab === "weeks" && <WeeklyCohorts data={data} />}
       {tab === "campaigns" && <CampaignCohorts data={data} />}
       {tab === "none" && <NoCampaign data={data} />}

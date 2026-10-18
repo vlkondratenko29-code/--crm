@@ -543,3 +543,4 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .camp-table th:first-child{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
 .camp-table th:first-child small{color:#7f8b9e;font-weight:400}
 .no-camp-meta{color:#7f8b9e;font-size:11px}.no-camp-meta a{color:#7fb2ff}
+.topup-link{display:inline-block;margin-top:6px;color:#7fb2ff;font-size:12px}

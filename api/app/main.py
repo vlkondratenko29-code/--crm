@@ -5605,6 +5605,94 @@ def _traffic_by_campaign(conn, start, end):
     return out
 
 
+_DEP_UID_RE = re.compile(r"(?<!\d)\d{5,12}(?!\d)")
+_DEP_NICK_RE = re.compile(r"@?([A-Za-z][A-Za-z0-9_]{3,31})")
+
+
+def _handler_deposits_by_lead(conn, leads):
+    """Approved deposits handlers entered in «Депы и ЗП», tied to leads by the client they wrote:
+    email, @username, UID or broker account number. lead_key -> [(day, amount, kind)]."""
+    by_email, by_nick, by_num = {}, {}, {}
+    for x in leads:
+        if x.get("email"):
+            by_email[x["email"].lower()] = x["lead_key"]
+        if x.get("tg_username"):
+            by_nick[x["tg_username"].lstrip("@").lower()] = x["lead_key"]
+        for num in [x.get("uid")] + [a.get("account_id") for a in x.get("matched_accounts") or []]:
+            if num and str(num).strip():
+                by_num[re.sub(r"\D", "", str(num))] = x["lead_key"]
+    out = {}
+    for r in conn.execute("SELECT day, client, amount, kind FROM handler_deposits WHERE status='approved'").fetchall():
+        text = str(r["client"] or "")
+        key = next((by_email[e] for e in watch_lib.emails_in(text) if e in by_email), None)
+        if not key:
+            key = next((by_num[n] for n in _DEP_UID_RE.findall(text) if n in by_num), None)
+        if not key:
+            key = next((by_nick[m.lower()] for m in _DEP_NICK_RE.findall(text) if m.lower() in by_nick), None)
+        if key:
+            out.setdefault(key, []).append((str(r["day"])[:10], float(r["amount"] or 0), r["kind"] or "FTD"))
+    return out
+
+
+def _lead_deposits(x, handler_deps, lead_row):
+    """What the CRM knows about a lead's money: the FTD amount, everything deposited and the redeposits.
+
+    Sources, as in the lead card: the broker report (FxPro accounts), the FTD amount Chatterfy sent, and
+    the deposits handlers entered in «Депы и ЗП» (approved). The largest total wins so nothing counts twice."""
+    accs = x.get("matched_accounts") or []
+    entries = handler_deps.get(x["lead_key"], [])
+    broker_total = sum(float(a.get("deposits") or 0) for a in accs)
+    broker_ftd = next((float(a["ftd_amount"]) for a in accs if a.get("ftd_amount")), 0.0)
+    hand_ftd = next((a for d, a, k in sorted(entries) if k == "FTD"), 0.0)
+    hand_total = sum(a for _, a, _ in entries)
+    chatterfy_ftd = float(x.get("ftd_amount") or 0)
+    ftd = broker_ftd or hand_ftd or chatterfy_ftd or (sorted(entries)[0][1] if entries else 0.0)
+    total = max(broker_total, hand_total, ftd)
+    redep_count = sum(1 for _, _, k in entries if k != "FTD")
+    redep = max(total - ftd, 0.0)
+    if redep > 0 and not redep_count:
+        redep_count = 1  # the broker total grew past the FTD: at least one redeposit
+    ftd_month = (lead_row or {}).get("ftd_month")
+    month = (lead_row or {}).get("deposits_by_month", {}).get(ftd_month, 0.0) if ftd_month else 0.0
+    month = max(month, sum(a for d, a, _ in entries if ftd_month and d[:7] == ftd_month), ftd if ftd_month else 0.0)
+    return {"ftd_amount": round(ftd, 2), "total": round(total, 2), "redep": round(redep, 2),
+            "redep_count": redep_count, "ftd_month_amount": round(month, 2),
+            "sources": [s for s, v in (("FxPro", broker_total or broker_ftd), ("Chatterfy", chatterfy_ftd), ("Депы и ЗП", hand_total)) if v]}
+
+
+def _next_cpa_step(amount, tier, rules):
+    """(deposit still missing, CPA gain) to reach the next payout step of the grid, or None at the top."""
+    row = rules["cpa_tiers"].get(tier) or rules["cpa_tiers"][FINANCE_DEFAULT_RULES["default_tier"]]
+    brackets = rules["cpa_brackets"]
+    idx = max(i for i, low in enumerate(brackets) if amount >= low)
+    now = row[min(idx, len(row) - 1)]
+    for j in range(idx + 1, min(len(brackets), len(row))):
+        if row[j] > now:
+            return round(brackets[j] - amount, 2), float(row[j] - now), float(row[j])
+    return None
+
+
+def _deposit_block(rows):
+    """Deposit metrics of a group of leads (a week, a campaign, the whole period)."""
+    ftd_rows = [r for r in rows if r["ftd_day"]]
+    with_amount = [r["dep"]["ftd_amount"] for r in ftd_rows if r["dep"]["ftd_amount"]]
+    redep_clients = sum(1 for r in ftd_rows if r["dep"]["redep"] > 0)
+    total = sum(r["dep"]["total"] for r in ftd_rows)
+    return {
+        "deposits": round(total, 2),
+        "avg_ftd": round(sum(with_amount) / len(with_amount), 2) if with_amount else None,
+        "redep": round(sum(r["dep"]["redep"] for r in ftd_rows), 2),
+        "redep_clients": redep_clients,
+        "redep_share": round(redep_clients / len(ftd_rows) * 100, 1) if ftd_rows else None,
+        "per_lead": round(total / len(rows), 2) if rows else None,
+        "ftd_with_amount": len(with_amount),
+    }
+
+
+FTD_AMOUNT_BUCKETS = ((0, 100, "до $100"), (100, 250, "$100–250"), (250, 500, "$250–500"),
+                      (500, 1000, "$500–1000"), (1000, None, "$1000+"))
+
+
 @app.get("/api/v1/cohorts/weekly")
 def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = Depends(current_username)):
     """Leads of the last `weeks` weeks: time to FTD, cohorts by the week the lead came, cohorts by campaign
@@ -5626,10 +5714,12 @@ def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = De
         traffic_day = _traffic_by_day(conn, geo, campaign_geos)
         traffic_campaign = _traffic_by_campaign(conn, start, today.isoformat())
         account_money = _account_deposits_by_month(conn)
+        handler_deps = _handler_deposits_by_lead(conn, leads)
     finally:
         conn.close()
 
-    cpa_of = {r["lead_key"]: r["cpa"] for r in _lead_rows(leads, rules, account_money)}
+    lead_rows = {r["lead_key"]: r for r in _lead_rows(leads, rules, account_money)}
+    cpa_of = {k: r["cpa"] for k, r in lead_rows.items()}
     rows = []
     for x in leads:
         if geo and x["geo"] != geo:
@@ -5648,6 +5738,8 @@ def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = De
             "days_to_reg": _days_between(lead_day, reg_known) if reg_known else None,
             "reg_to_ftd": _days_between(reg_known, ftd_known) if reg_known and ftd_known else None,
             "deposit": deposit, "cpa": cpa_of.get(x["lead_key"], 0.0),
+            "dep": _lead_deposits(x, handler_deps, lead_rows.get(x["lead_key"])), "tier": (lead_rows.get(x["lead_key"]) or {}).get("tier"),
+            "ftd_month": (lead_rows.get(x["lead_key"]) or {}).get("ftd_month"),
             "campaign": x.get("campaign") or "", "source": x.get("source"), "x": x,
         })
     for r in rows:  # a negative gap means the dates come from different sources: treat as same day
@@ -5687,6 +5779,7 @@ def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = De
             "cost_per_ftd": round(spend / ftd, 2) if ftd else None,
             "cpa_revenue": round(cpa, 2), "roi": round((cpa - spend) / spend * 100, 1) if spend else None,
             "median_days": _median([r["days_to_ftd"] for r in w_rows]), "ftd_pct_cum": cum,
+            **_deposit_block(w_rows),
         })
 
     # Cohorts by campaign over the same period, with the campaign's own spend.
@@ -5715,15 +5808,42 @@ def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = De
             "cpa_revenue": round(cpa, 2), "roi": round((cpa - spend) / spend * 100, 1) if spend else None,
             "median_days": _median([r["days_to_ftd"] for r in c_rows]),
             "first_lead": min((r["lead_day"] for r in c_rows), default=None),
+            **_deposit_block(c_rows),
         })
     out_camps.sort(key=lambda c: (-c["spend"], -c["leads"]))
+
+    # Deposits of the period: amounts, redeposits, FTD sizes and this month's FTDs a top-up away from a higher CPA.
+    ftd_rows = [r for r in rows if r["ftd_day"]]
+    amounts = [r["dep"]["ftd_amount"] for r in ftd_rows if r["dep"]["ftd_amount"]]
+    this_month = today.isoformat()[:7]
+    topup = []
+    for r in ftd_rows:
+        if r["ftd_month"] != this_month or not r["tier"] or not r["dep"]["ftd_month_amount"]:
+            continue  # without a known amount the step to the next payout is a guess
+        step = _next_cpa_step(r["dep"]["ftd_month_amount"], r["tier"], rules)
+        if step and step[0] <= 600:
+            x = r["x"]
+            topup.append({"lead_key": r["lead_key"], "name": x.get("name") or (("@" + x["tg_username"]) if x.get("tg_username") else None) or x.get("email"),
+                          "ftd_day": r["ftd_day"], "month_amount": r["dep"]["ftd_month_amount"], "missing": step[0],
+                          "cpa_gain": step[1], "cpa_next": step[2], "campaign": r["campaign"] or None,
+                          "assignee": x.get("assignee"), "chat_link": x.get("chat_link")})
+    topup.sort(key=lambda t: t["missing"])
+    deposits = {
+        **_deposit_block(rows),
+        "ftd": len(ftd_rows),
+        "ftd_buckets": [{"label": label, "count": sum(1 for a in amounts if a >= lo and (hi is None or a < hi))}
+                        for lo, hi, label in FTD_AMOUNT_BUCKETS],
+        "sources": {s: sum(1 for r in ftd_rows if s in r["dep"]["sources"]) for s in ("FxPro", "Chatterfy", "Депы и ЗП")},
+        "no_amount": sum(1 for r in ftd_rows if not r["dep"]["total"]),
+        "topup": topup, "topup_month": this_month,
+    }
 
     no_campaign = [r for r in rows if not r["campaign"]]
     no_campaign.sort(key=lambda r: r["lead_day"], reverse=True)
     return {
         "geo": geo, "weeks": weeks, "start": start, "end": today.isoformat(),
         "leads": len(rows), "time_to_ftd": _ttf_summary(rows),
-        "weekly": out_weeks, "width": width,
+        "weekly": out_weeks, "width": width, "deposits": deposits,
         "campaigns": out_camps,
         "no_campaign": {
             "count": len(no_campaign), "share": round(len(no_campaign) / len(rows) * 100, 1) if rows else None,
