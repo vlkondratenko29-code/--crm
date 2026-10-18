@@ -63,6 +63,7 @@ export default function Watch({ username }) {
   const [allowed, setAllowed] = useState("");
   const [codes, setCodes] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [showKey, setShowKey] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -76,7 +77,7 @@ export default function Watch({ username }) {
     setBusy(true); setMsg("");
     try {
       await api("/api/v1/settings/watch", { username, method: "POST", body: { api_key: key || null, allowed, codes } });
-      setKey(""); setMsg("Сохранено."); await load();
+      setKey(""); setShowKey(false); setMsg("Сохранено."); await load();
     } catch (e) { setMsg(e.message); } finally { setBusy(false); }
   }
   async function runNow() {
@@ -89,6 +90,8 @@ export default function Watch({ username }) {
   }
 
   const st = data?.status || {};
+  // A missing, malformed or rejected key: open the key field right away instead of hiding it at the bottom.
+  const keyBroken = data && (!data.configured || data.key_problem || /401|token/i.test(st.error || ""));
   return (
     <section className="role-dashboard stats-screen">
       <div className="role-hero"><div><p className="eyebrow">КОНТРОЛЬ</p>
@@ -101,7 +104,17 @@ export default function Watch({ username }) {
           <div><span>Нарушений</span><b className={data.alerts.length ? "t-bad" : ""}>{data.alerts.length}</b><small>последние 100</small></div>
         </div>
         {st.error && <p className="recon-hint warn">{st.error}</p>}
-        {data.key_problem && <p className="recon-hint warn">Сохранённый ключ неверный: {data.key_problem}{data.key_from_env ? " Ключ задан в Render (переменная CHATTERFY_API_KEY) — исправь его там." : " Вставь новый в «Настройках» ниже."}</p>}
+        {data.key_problem && <p className="recon-hint warn">Сохранённый ключ неверный: {data.key_problem}{data.key_from_env ? " Ключ задан в Render (переменная CHATTERFY_API_KEY) — исправь его там." : " Вставь новый в поле «Ключ Chatterfy» ниже."}</p>}
+        <div className={"buy-upload" + (keyBroken ? " key-broken" : "")}>
+          <div><b>Ключ Chatterfy</b><small>{!data.configured ? "не задан" : keyBroken ? "Chatterfy его не принимает — выпусти новый" : data.key_from_env ? "задан в Render" : "задан"}</small></div>
+          <button className={keyBroken ? "upload-btn" : "mini-btn"} onClick={() => setShowKey(v => !v)}>{showKey || keyBroken ? "Вставить новый ключ" : "Заменить ключ"}</button>
+        </div>
+        {(showKey || keyBroken) && <div className="watch-settings">
+          <label>Ключ сервисного аккаунта Chatterfy
+            <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder="вставь ключ целиком — начинается с eyJ" autoComplete="off" /></label>
+          <p className="recon-hint">Chatterfy → раздел компании (Company) → Service accounts → выпусти ключ и сразу скопируй его целиком: длинная строка из трёх частей через точку.{data.key_from_env ? " Сейчас ключ задан в Render (переменная CHATTERFY_API_KEY) — он главнее: замени его там, иначе новый ключ отсюда не заработает." : ""}</p>
+          <button className="upload-btn" disabled={busy || !key.trim()} onClick={save}>Сохранить ключ</button>
+        </div>}
         <div className="buy-upload">
           <div><b>Проверить сейчас</b><small>Не ждать следующих 3 минут</small></div>
           <button className="upload-btn" disabled={busy} onClick={runNow}>{busy ? "Проверяю…" : "Проверить"}</button>
@@ -125,10 +138,8 @@ export default function Watch({ username }) {
           {!data.alerts.length && <div className="empty-state">{data.configured ? "Нарушений не найдено." : "Добавь ключ Chatterfy, и проверка начнётся."}</div>}
         </div>
 
-        <button className="link-btn" onClick={() => setShowSettings(v => !v)}>{showSettings ? "Скрыть настройки" : "Настройки"}</button>
+        <button className="link-btn" onClick={() => setShowSettings(v => !v)}>{showSettings ? "Скрыть настройки" : "Настройки: наши ссылки и кодовые слова"}</button>
         {showSettings && <div className="watch-settings">
-          <label>Ключ сервисного аккаунта Chatterfy {data.configured && <small>(уже задан{data.key_from_env ? " в Render" : ""}; оставь пустым, чтобы не менять)</small>}
-            <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder="вставь ключ" autoComplete="off" /></label>
           <label>Наши ссылки и ники (не считаются нарушением), по одному в строке
             <textarea rows={5} value={allowed} onChange={e => setAllowed(e.target.value)} /></label>
           <label>Кодовые слова канала (через запятую)

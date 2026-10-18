@@ -1787,6 +1787,9 @@ def import_chatterfy_history(apply: bool = False, geo: str = "", x_telegram_user
             if len(page) < 100:
                 break
     except watch_lib.ChatterfyError as exc:
+        if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+            raise HTTPException(status_code=502, detail="Chatterfy не принимает ключ CRM. Выпусти новый ключ сервисного аккаунта "
+                                                        "и вставь его во вкладке «Контроль» → «Ключ Chatterfy».")
         raise HTTPException(status_code=502, detail=str(exc))
 
     geo = clean_geo(geo) or GEO_DEFAULT
