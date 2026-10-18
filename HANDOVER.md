@@ -59,6 +59,7 @@
 | `CHATTERFY_BOT_ID`, `CHATTERFY_SPACE_ID` | Бот и пространство Chatterfy | адрес бота в Chatterfy |
 | `CHATTERFY_WEBHOOK_SECRET` | Секрет входящего вебхука `/webhook/chatterfy?secret=...` | придумать и вписать в Chatterfy |
 | `CHATTERFY_WEBHOOK_URL` | Исходящий вебхук в Chatterfy | Chatterfy → Webhooks & API |
+| `ANTHROPIC_API_KEY` | Ключ Claude для AI-разбора диалогов обработчиков («Контроль» → «Разбор ошибок»). Без него работают только правила | console.anthropic.com → API keys |
 | `DATA_SINCE` | С какого дня CRM считает данные, по умолчанию `2026-10-09` | — |
 | `FB_ACCESS_TOKEN`, `FB_AD_ACCOUNT_IDS` | Расход из Facebook сам, без CSV (токен с `ads_read`, id кабинетов через запятую) | Business Manager → Пользователи системы → Сгенерировать маркер |
 | `DIGEST_HOUR` | Во сколько (время команды) приходит утренняя сводка, по умолчанию `9` | — |

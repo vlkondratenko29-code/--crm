@@ -6,6 +6,7 @@ import Login from "./Login.jsx";
 import Leads, { LeadCard } from "./Leads.jsx";
 import Stats from "./Stats.jsx";
 import Watch from "./Watch.jsx";
+import DialogReview from "./DialogReview.jsx";
 import Payroll from "./Payroll.jsx";
 import BuyerReports from "./BuyerReports.jsx";
 import Shifts from "./Shifts.jsx";
@@ -68,7 +69,7 @@ function App() {
     head_buying: { label: "ХЭД БАИНГА", title: "Баинг и результаты", main: ["stats", "dashboard", "leads", "reports"], more: ["traffic", "clients", "reconcile", "finance"] },
     buyer: { label: "БАЕР", title: "Отчёты по расходу", main: ["reports"], more: [] },
     seo: { label: "SEO", title: "Трафик и воронка", main: ["stats", "dashboard", "clients"], more: ["payroll", "shifts"] },
-    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "payroll", "shifts", "clients"], more: [] },
+    handler: { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "payroll", "shifts", "clients", "review"], more: [] },
   }[effectiveUser.role] || { label: "ОБРАБОТЧИК", title: "Мои реги и депы", main: ["stats", "clients"], more: [] };
   roleMeta.tabs = [...roleMeta.main, ...roleMeta.more];
   const canSee = (id) => roleMeta.tabs.includes(id);
@@ -411,6 +412,7 @@ function App() {
       </section>}
       {tab === "stats" && canSee("stats") && <Stats username={effectiveUser.username} />}
       {tab === "watch" && canSee("watch") && <Watch username={effectiveUser.username} />}
+      {tab === "review" && canSee("review") && <section className="role-dashboard stats-screen"><DialogReview username={effectiveUser.username} /></section>}
       {tab === "payroll" && canSee("payroll") && <Payroll username={effectiveUser.username} />}
       {tab === "reports" && canSee("reports") && <BuyerReports username={effectiveUser.username} />}
       {tab === "shifts" && canSee("shifts") && <Shifts username={effectiveUser.username} />}
@@ -606,12 +608,12 @@ function useWide() {
 const TAB_LABELS = {
   dashboard: "Главная", leads: "Лиды", reconcile: "Сверка", clients: "Клиенты", stats: "Статистика",
   finance: "Финансы", traffic: "Трафик", operations: "Операции", alerts: "Алерты", admin: "Команда", watch: "Контроль",
-  payroll: "Депы и ЗП", reports: "Отчёты", shifts: "Смены", pnl: "P&L",
+  payroll: "Депы и ЗП", reports: "Отчёты", shifts: "Смены", pnl: "P&L", review: "Разбор",
 };
 const TAB_ICONS = {
   dashboard: "◉", leads: "☷", reconcile: "⚖", clients: "⌕", stats: "◈",
   finance: "$", traffic: "↗", operations: "⚙", alerts: "⚠", admin: "👥", watch: "🛡",
-  payroll: "💵", reports: "▤", shifts: "🗓", pnl: "📒",
+  payroll: "💵", reports: "▤", shifts: "🗓", pnl: "📒", review: "🎓",
 };
 const ROLE_LABELS = { admin: "Админ", head_buying: "Хэд баинга", buyer: "Баер", seo: "SEO", handler: "Обработчик" };
 const STATUS_LABELS = { "Chatterfy lead": "Лид Chatterfy", "FxPro account": "Счёт FxPro" };

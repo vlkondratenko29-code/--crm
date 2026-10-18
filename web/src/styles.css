@@ -506,3 +506,20 @@ nav button{display:flex;flex-direction:column;align-items:center;gap:2px;padding
 .verdict-sum .verdict-stop{color:#ff9b85}
 .verdict-sum .verdict-scale{color:#8fe39a}
 .verdict-sum small{flex-basis:100%;font-weight:400;color:#8993a3;font-size:11px}
+/* Dialog review */
+.review-top{display:flex;flex-wrap:wrap;gap:6px}
+.review-chat{padding:0;overflow:hidden}
+.review-head,.review-item{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;background:none;border:none;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.review-head{padding:11px 12px}
+.review-head b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.review-head small,.review-item small{color:#7f8b9e;font-size:11px;white-space:nowrap}
+.review-item{flex-direction:column;align-items:stretch}
+.review-item .st-row-main{margin-bottom:2px}
+.review-body{padding:0 12px 12px;display:flex;flex-direction:column;gap:10px}
+.review-body a{color:#7fb2ff;font-size:12px}
+.review-good{margin:0;color:#5fd18a;font-size:12px;line-height:1.4}
+.review-finding{padding:10px;border-radius:10px;background:#121a25;border:1px solid #263244;font-size:12px;line-height:1.45}
+.review-finding small{color:#7f8b9e}
+.review-finding blockquote{margin:8px 0;padding:6px 10px;border-left:3px solid #3a4a60;color:#c9d2df;word-break:break-word;white-space:pre-wrap}
+.review-finding p{margin:6px 0 0;color:#c9d2df}
+.review-better{color:#a9e3bf!important}

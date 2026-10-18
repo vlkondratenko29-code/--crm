@@ -24,6 +24,7 @@ from .auth import validate_init_data, hash_password, check_password, password_ve
 from . import brokers as broker_lib
 from . import watch as watch_lib
 from . import facebook as fb_lib
+from . import coach as coach_lib
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 DB_PATH = os.getenv("DB_PATH", "broker_crm.db")
@@ -347,6 +348,26 @@ def init_db():
                 found_at TEXT,
                 notified INTEGER DEFAULT 0,
                 PRIMARY KEY (message_id, kind)
+            )
+        """)
+        # Dialog reviews: likely mistakes in a handler's Chatterfy chats (rules + Claude), kept for the handler.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dialog_reviews (
+                id TEXT PRIMARY KEY,
+                operator_id TEXT,
+                operator_name TEXT,
+                operator_email TEXT,
+                days INTEGER,
+                status TEXT,
+                error TEXT,
+                ai INTEGER DEFAULT 0,
+                chats INTEGER DEFAULT 0,
+                findings INTEGER DEFAULT 0,
+                avg_score REAL,
+                report TEXT,
+                created_at TEXT,
+                created_by TEXT,
+                finished_at TEXT
             )
         """)
         # Payroll: deposits handlers enter themselves; an admin approves them before they count.
@@ -4231,15 +4252,11 @@ def _fmt_ts(value):
     return (t + timedelta(hours=STATS_TZ_HOURS)).strftime("%d.%m %H:%M") if t else "??"
 
 
-@app.get("/api/v1/dialogs/export")
-def dialog_export(operator_id: str, days: int = 14, limit: int = 25, x_telegram_username: str = Depends(current_username)):
-    """Text of the operator's chats for the last `days`: every message with who wrote it
-    (client / bot or AI / operator name). Chats are found by the CRM assignment and by the
-    operator's own messages in recent chats."""
-    days, limit = max(1, min(int(days), 60)), max(1, min(int(limit), 60))
+def _operator_dialogs(operator_id: str, days: int, limit: int):
+    """(operator, chats, scanned) for the last `days`. Chats are found by the CRM assignment and by the
+    operator's own messages in recent chats; every message is tagged client / bot / operator / other."""
     conn = db()
     try:
-        require_admin(x_telegram_username, conn)
         key = watch_key(conn)
         if not key:
             raise HTTPException(status_code=400, detail="Нет ключа Chatterfy: укажи его во вкладке «Контроль»")
@@ -4310,25 +4327,159 @@ def dialog_export(operator_id: str, days: int = 14, limit: int = 25, x_telegram_
         raise HTTPException(status_code=502, detail=str(exc))
 
     names = {i: p["name"] for i, p in people.items()}
-    blocks = []
+    out = []
     for cid in found:
         c = meta.get(cid, {})
-        items = sorted(messages.get(cid) or [], key=lambda m: m.get("created_at") or "")
-        lines = [f"=== Чат: {c.get('name') or 'Клиент'} · начат {_fmt_ts(c.get('created_at'))} · {_chat_link(cid)}"]
-        for m in items:
+        msgs = []
+        for m in sorted(messages.get(cid) or [], key=lambda m: m.get("created_at") or ""):
             if m.get("sender_type") != "outcoming":
-                who = "Клиент"
+                role, who = "client", "Клиент"
+            elif m.get("sender") == operator_id:
+                role, who = "operator", "Оператор " + names.get(operator_id, "?")
             elif m.get("sender"):
-                who = ("Оператор " if m.get("sender") == operator_id else "Другой оператор ") + names.get(m.get("sender"), "?")
+                role, who = "other", "Другой оператор " + names.get(m.get("sender"), "?")
             else:
-                who = "Бот/AI"
-            text = (m.get("content") or "").strip() or "[вложение/медиа]"
-            lines.append(f"[{_fmt_ts(m.get('created_at'))}] {who}: {text}")
+                role, who = "bot", "Бот/AI"
+            msgs.append({"at": m.get("created_at"), "role": role, "who": who, "text": (m.get("content") or "").strip()})
+        out.append({"id": cid, "name": c.get("name") or "Клиент", "started": c.get("created_at"),
+                    "link": _chat_link(cid), "messages": msgs})
+    return op, out, len(recent) if chats else 0
+
+
+@app.get("/api/v1/dialogs/export")
+def dialog_export(operator_id: str, days: int = 14, limit: int = 25, x_telegram_username: str = Depends(current_username)):
+    """Text of the operator's chats for the last `days`: every message with who wrote it
+    (client / bot or AI / operator name)."""
+    days, limit = max(1, min(int(days), 60)), max(1, min(int(limit), 60))
+    require_admin(x_telegram_username)
+    op, chats, scanned = _operator_dialogs(operator_id, days, limit)
+    blocks = []
+    for c in chats:
+        lines = [f"=== Чат: {c['name']} · начат {_fmt_ts(c['started'])} · {c['link']}"]
+        lines += [f"[{_fmt_ts(m['at'])}] {m['who']}: {m['text'] or '[вложение/медиа]'}" for m in c["messages"]]
         blocks.append("\n".join(lines))
-    head = (f"Диалоги оператора {op['name']} ({op['email']}) за {days} дн. · чатов: {len(found)} "
+    head = (f"Диалоги оператора {op['name']} ({op['email']}) за {days} дн. · чатов: {len(chats)} "
             f"· выгружено {(datetime.utcnow() + timedelta(hours=STATS_TZ_HOURS)).strftime('%d.%m.%Y %H:%M')}")
-    return {"operator": op["name"], "chats": len(found), "scanned": len(recent) if chats else 0,
+    return {"operator": op["name"], "chats": len(chats), "scanned": scanned,
             "text": head + "\n\n" + "\n\n".join(blocks)}
+
+
+# --- Dialog review: likely mistakes in a handler's chats, saved so the handler can read it later ---
+
+REVIEW_CHATS = 25            # chats per review (each one is a Claude call when AI is on)
+
+
+class DialogReviewRequest(BaseModel):
+    operator_id: str
+    days: int = 7
+
+
+def _run_review(review_id: str, operator_id: str, days: int):
+    status, error, report = "done", None, None
+    try:
+        op, chats, _ = _operator_dialogs(operator_id, days, REVIEW_CHATS)
+        conn = db()
+        try:
+            allowed = _list_setting(conn, WATCH_ALLOWED, watch_lib.DEFAULT_ALLOWED)
+        finally:
+            conn.close()
+        report = coach_lib.review(chats, allowed, _fmt_ts)
+    except HTTPException as exc:
+        status, error = "error", str(exc.detail)
+    except Exception as exc:
+        status, error = "error", f"{type(exc).__name__}: {exc}"
+    conn = db()
+    try:
+        conn.execute(
+            "UPDATE dialog_reviews SET status=%s, error=%s, report=%s, chats=%s, findings=%s, avg_score=%s, finished_at=%s "
+            "WHERE id=%s",
+            (status, error, json.dumps(report, ensure_ascii=False) if report else None,
+             len(report["chats"]) if report else 0, report["findings"] if report else 0,
+             report["avg_score"] if report else None, datetime.utcnow().isoformat(), review_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _review_scope(username, conn):
+    """None for an admin (sees every review), else the handler's own Chatterfy email."""
+    user = require_access(username, conn)
+    if user["role"] == "admin":
+        return None
+    if user["role"] != "handler":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = conn.execute("SELECT chatterfy_email FROM crm_users WHERE lower(username)=%s", (user["username"].lower(),)).fetchone()
+    email = (row["chatterfy_email"] if row else "") or ""
+    if not email:
+        raise HTTPException(status_code=400, detail="К твоему аккаунту не привязана почта Chatterfy — попроси админа указать её во вкладке «Команда»")
+    return email.lower()
+
+
+@app.post("/api/v1/dialogs/review")
+def start_dialog_review(payload: DialogReviewRequest, x_telegram_username: str = Depends(current_username)):
+    days = max(1, min(int(payload.days), 30))
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        running = conn.execute("SELECT id FROM dialog_reviews WHERE operator_id=%s AND status='running' AND created_at>=%s",
+                               (payload.operator_id, (datetime.utcnow() - timedelta(minutes=20)).isoformat())).fetchone()
+        if running:
+            return {"id": running["id"], "already": True}
+        key = watch_key(conn)
+        if not key:
+            raise HTTPException(status_code=400, detail="Нет ключа Chatterfy: укажи его во вкладке «Контроль»")
+    finally:
+        conn.close()
+    try:
+        op = _space_people(watch_lib.Chatterfy(key)).get(payload.operator_id)
+    except watch_lib.ChatterfyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if not op:
+        raise HTTPException(status_code=404, detail="Нет такого оператора в Chatterfy")
+    review_id = uuid.uuid4().hex
+    conn = db()
+    try:
+        conn.execute(
+            "INSERT INTO dialog_reviews(id, operator_id, operator_name, operator_email, days, status, ai, created_at, created_by) "
+            "VALUES(%s,%s,%s,%s,%s,'running',%s,%s,%s)",
+            (review_id, payload.operator_id, op["name"], op["email"], days, 1 if coach_lib.ai_enabled() else 0,
+             datetime.utcnow().isoformat(), admin))
+        conn.commit()
+    finally:
+        conn.close()
+    threading.Thread(target=_run_review, args=(review_id, payload.operator_id, days), daemon=True).start()
+    return {"id": review_id, "ai": coach_lib.ai_enabled()}
+
+
+@app.get("/api/v1/dialogs/reviews")
+def list_dialog_reviews(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        email = _review_scope(x_telegram_username, conn)
+        cols = "id, operator_name, operator_email, days, status, error, ai, chats, findings, avg_score, created_at, finished_at"
+        if email is None:
+            rows = conn.execute(f"SELECT {cols} FROM dialog_reviews ORDER BY created_at DESC LIMIT 50").fetchall()
+        else:
+            rows = conn.execute(f"SELECT {cols} FROM dialog_reviews WHERE lower(operator_email)=%s AND status='done' "
+                                "ORDER BY created_at DESC LIMIT 20", (email,)).fetchall()
+    finally:
+        conn.close()
+    return {"reviews": [dict(r) for r in rows], "ai": coach_lib.ai_enabled(), "admin": email is None}
+
+
+@app.get("/api/v1/dialogs/review/{review_id}")
+def read_dialog_review(review_id: str, x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        email = _review_scope(x_telegram_username, conn)
+        row = conn.execute("SELECT * FROM dialog_reviews WHERE id=%s", (review_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row or (email is not None and (row["operator_email"] or "").lower() != email):
+        raise HTTPException(status_code=404, detail="Разбор не найден")
+    out = dict(row)
+    out["report"] = json.loads(out["report"]) if out.get("report") else None
+    return out
 
 
 class WatchSettings(BaseModel):

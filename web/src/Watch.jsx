@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { api } from "./api.js";
+import DialogReview from "./DialogReview.jsx";
 
 // Operator watch: suspicious outgoing messages in Chatterfy (wallets, foreign links, @nicks, phones).
 const when = v => v ? new Date(v.endsWith("Z") ? v : v + "Z").toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -138,6 +139,7 @@ export default function Watch({ username }) {
       </>}
       {!data && !error && <p className="subtitle">Загружаю…</p>}
       {data?.configured && <DialogExport username={username} />}
+      {data?.configured && <DialogReview username={username} admin />}
     </section>
   );
 }
