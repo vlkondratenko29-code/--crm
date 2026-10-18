@@ -1306,6 +1306,16 @@ class DataSinceSetting(BaseModel):
     since: str = ""  # YYYY-MM-DD, "" = all history
 
 
+@app.get("/api/v1/settings/data-since")
+def read_data_since(x_telegram_username: str = Depends(current_username)):
+    conn = db()
+    try:
+        require_admin(x_telegram_username, conn)
+        return {"since": data_since(conn), "default": DATA_SINCE_DEFAULT}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/settings/data-since")
 def set_data_since(payload: DataSinceSetting, x_telegram_username: str = Depends(current_username)):
     value = payload.since.strip()
@@ -1566,6 +1576,19 @@ async def import_broker_report(broker: str = Form(...), files: list[UploadFile] 
     }
 
 
+HISTORY_EVENTS = (
+    ("FTD", re.compile(r"(?<![a-z0-9])ftd(?![a-z0-9])|вн[её]с(?:ла)?\s+деп|пополнил[аи]?\s+деп|сделал[аи]?\s+деп|депнул", re.I)),
+    ("REG", re.compile(r"(?<![a-z0-9])reg(?![a-z0-9])|зарегал|зарегистрир", re.I)),
+    ("FT", re.compile(r"(?<![a-z0-9])ft(?![a-z0-9])|отторговал", re.I)),
+)
+
+
+def history_event_types(*texts):
+    """Funnel events named in Chatterfy tags / stage names / the broker event field."""
+    text = " | ".join(str(t) for t in texts if t)
+    return [t for t, rx in HISTORY_EVENTS if rx.search(text)]
+
+
 def parse_chatterfy_export(raw: bytes):
     """Parse Chatterfy 'Users → Export CSV' (Name;Telegram ID;Username;Tags;Started;...)."""
     headers, rows = broker_lib.read_csv(raw)
@@ -1655,14 +1678,10 @@ async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegra
                 # Chatterfy may export tags as "CRM: REG", "FTD | ...",
                 # JSON-like text, etc. Detect the funnel tokens inside each
                 # tag instead of requiring an exact tag string.
-                tag_text = " | ".join(str(t) for t in lead["tags"])
-                detected = []
-                for event_type in ("FTD", "REG", "FT"):
-                    if re.search(r"(?<![a-z0-9])" + event_type.casefold() + r"(?![a-z0-9])", tag_text.casefold()):
-                        detected.append(event_type)
-                for event_type in detected:
+                for event_type in history_event_types(*lead["tags"], lead["step"]):
                     if record_event(conn, email=f"chat:{lead['chat_id']}", event_type=event_type, source="chatterfy",
-                                    chat_id=lead["chat_id"], metadata={"from": "export_tag", "tag": event_type}):
+                                    event_date=(lead["started"] or "")[:10] or None, chat_id=lead["chat_id"],
+                                    metadata={"from": "export_tag", "tag": event_type, "approx": True}):
                         events += 1
         conn.commit()
     except HTTPException:
@@ -1673,6 +1692,177 @@ async def import_chatterfy_export(files: list[UploadFile] = File(...), x_telegra
     finally:
         conn.close()
     return {"status": "ok", "created": created, "updated": updated, "events_from_tags": events}
+
+
+HISTORY_MAX_CHATS = 5000
+_NAME_KEYS = ("name", "title", "key", "label", "slug")
+_TRACKER_KEYS = {"clickid", "click_id", "utm_campaign", "campaign_name", "utm_source", "utm_medium", "utm_content",
+                 "utm_term", "utm_id", "ad_id", "adset_id", "adset_name", "ad_campaign_id", "placement",
+                 "site_source_name", "tracker_campaign_name", "tracker_source_name"}
+_FIELD_AMOUNT = ("сумма депозита", "deposit_amount")
+_FIELD_CONTACT = ("uid / email клиента", "23", "uid", "email клиента")
+_FIELD_EVENT = ("событие брокера", "broker_event")
+_FIELD_DATEREG = ("дата регистрации", "datereg")
+
+
+def _chat_history(chat):
+    """What a Chatterfy chat says about the client: fields, tags, stage, tracker data.
+
+    The chat JSON is not documented, so walk it and pick things up by key and label,
+    skipping the parts that describe staff and messages."""
+    fields, texts, tracker = {}, [], {}
+
+    def label_of(d):
+        return next((str(d[k]) for k in _NAME_KEYS if isinstance(d.get(k), (str, int)) and str(d.get(k)).strip()), None)
+
+    def visit(node, key=""):
+        k = key.lower()
+        if isinstance(node, dict):
+            if _TRACKER_KEYS & set(node):
+                tracker.update({kk: vv for kk, vv in node.items() if kk in _TRACKER_KEYS and isinstance(vv, (str, int))})
+            lab = label_of(node)
+            if lab is not None and isinstance(node.get("value"), (str, int, float)):
+                fields[lab.strip().lower()] = node["value"]
+                for kk in _NAME_KEYS:
+                    if isinstance(node.get(kk), (str, int)):
+                        fields[str(node[kk]).strip().lower()] = node["value"]
+            if k in ("fields", "custom_fields", "customfields", "variables", "custom_data"):
+                for kk, vv in node.items():
+                    if isinstance(vv, (str, int, float)):
+                        fields[str(kk).strip().lower()] = vv
+            if ("stage" in k or k in ("step", "flow")) and lab:
+                texts.append(lab)
+            for kk, vv in node.items():
+                if str(kk).lower() in watch_lib._STAFF_KEYS:
+                    continue
+                visit(vv, str(kk))
+        elif isinstance(node, list):
+            for item in node:
+                if "tag" in k:
+                    texts.append(label_of(item) if isinstance(item, dict) else item)
+                visit(item, key)
+        elif isinstance(node, str) and ("stage" in k or "tag" in k):
+            texts.append(node)
+
+    visit(chat)
+    pick = lambda names: next((fields[n] for n in names if fields.get(n) not in (None, "", "-")), None)
+    return {"fields": fields, "texts": [t for t in texts if t], "tracker": tracker,
+            "amount": to_float(pick(_FIELD_AMOUNT)), "contact": pick(_FIELD_CONTACT),
+            "broker_event": pick(_FIELD_EVENT), "datereg": pick(_FIELD_DATEREG)}
+
+
+def _outline(node, depth=0):
+    """Keys of a JSON object two levels deep, no values: to see the shape of the Chatterfy data."""
+    if isinstance(node, dict):
+        return {k: (_outline(v, depth + 1) if depth < 1 else type(v).__name__) for k, v in list(node.items())[:40]}
+    if isinstance(node, list):
+        return [_outline(node[0], depth)] if node else []
+    return type(node).__name__
+
+
+@app.post("/api/v1/chatterfy/history")
+def import_chatterfy_history(apply: bool = False, geo: str = "", x_telegram_username: str = Depends(current_username)):
+    """Bring the main bot's past chats from Chatterfy: leads with their start day and ad labels, and the REG / FTD
+    the chat shows (tags, sale stage, «Событие брокера»), with the deposit amount and the client's UID / email.
+
+    The day of a past deposit is not stored in Chatterfy, so history events carry the chat's start day marked
+    approximate: exact dates from the webhook or the broker report always win, and timings skip them.
+    apply=false only counts what would change."""
+    conn = db()
+    try:
+        admin = require_admin(x_telegram_username, conn)
+        key = watch_key(conn)
+        if not key:
+            raise HTTPException(status_code=400, detail="Нет ключа Chatterfy: укажи его во вкладке «Контроль»")
+        existing = {r["chat_id"]: dict(r) for r in conn.execute(
+            "SELECT chat_id, email, uid, first_seen_at, attribution_json FROM chatterfy_leads").fetchall()}
+    finally:
+        conn.close()
+    client = watch_lib.Chatterfy(key)
+    chats = []
+    try:
+        for offset in range(0, HISTORY_MAX_CHATS, 100):
+            page = client.chats(CHATTERFY_BOT_ID, 100, offset)
+            chats.extend(page)
+            if len(page) < 100:
+                break
+    except watch_lib.ChatterfyError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    geo = clean_geo(geo) or GEO_DEFAULT
+    stats = {"chats": len(chats), "new_leads": 0, "existing": 0, "reg": 0, "ftd": 0, "ftd_with_amount": 0,
+             "with_uid": 0, "with_campaign": 0, "oldest": None}
+    samples, plan = [], []
+    for c in chats:
+        cid = str(c.get("id") or "")
+        if not cid:
+            continue
+        h = _chat_history(c)
+        started = str(c.get("created_at") or "")[:19] or None
+        contact = str(h["contact"] or "").strip()
+        uid = broker_lib.normalize_account_id(contact)
+        email = broker_lib.normalize_email(contact) if "@" in contact else None
+        types = history_event_types(*h["texts"], h["broker_event"])
+        campaign = h["tracker"].get("utm_campaign") or h["tracker"].get("campaign_name")
+        stats["existing" if cid in existing else "new_leads"] += 1
+        stats["reg"] += int("REG" in types or "FTD" in types)
+        stats["ftd"] += int("FTD" in types)
+        stats["ftd_with_amount"] += int("FTD" in types and bool(h["amount"]))
+        stats["with_uid"] += int(bool(uid or email))
+        stats["with_campaign"] += int(bool(campaign))
+        if started and (not stats["oldest"] or started < stats["oldest"]):
+            stats["oldest"] = started
+        if types and len(samples) < 12:
+            samples.append({"name": c.get("name"), "started": started, "events": types, "amount": h["amount"],
+                            "uid": uid or email, "campaign": campaign})
+        plan.append((cid, c, h, started, uid, email, types))
+
+    if not apply:
+        return {**stats, "applied": False, "samples": samples, "shape": _outline(chats[0]) if chats else None}
+
+    now = datetime.utcnow().isoformat()
+    written = 0
+    conn = db()
+    try:
+        for cid, c, h, started, uid, email, types in plan:
+            old = existing.get(cid)
+            attr = {}
+            if old and old["attribution_json"]:
+                try:
+                    attr = json.loads(old["attribution_json"]) or {}
+                except Exception:
+                    attr = {}
+            fill = {"name": c.get("name"), "username": c.get("username"), "geo": geo,
+                    "created_at": started, "tags": ", ".join(str(t) for t in h["texts"]) or None,
+                    **{("clickid" if k == "click_id" else k): str(v) for k, v in h["tracker"].items()}}
+            for k, v in fill.items():  # the webhook's data wins: history only fills gaps
+                if v not in (None, "") and not attr.get(k):
+                    attr[k] = clean_attribution_value(v) if k != "geo" else v
+            attr = {k: v for k, v in attr.items() if v is not None}
+            conn.execute(
+                "INSERT INTO chatterfy_leads(chat_id, email, click_id, attribution_json, first_seen_at, updated_at, uid) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(chat_id) DO UPDATE SET "
+                "email=COALESCE(chatterfy_leads.email, excluded.email), uid=COALESCE(chatterfy_leads.uid, excluded.uid), "
+                "click_id=COALESCE(chatterfy_leads.click_id, excluded.click_id), attribution_json=excluded.attribution_json, "
+                "first_seen_at=CASE WHEN excluded.first_seen_at IS NOT NULL AND (chatterfy_leads.first_seen_at IS NULL "
+                "OR excluded.first_seen_at < chatterfy_leads.first_seen_at) THEN excluded.first_seen_at ELSE chatterfy_leads.first_seen_at END",
+                (cid, email, attr.get("clickid"), json.dumps(attr, ensure_ascii=False), started or now, now, uid))
+            key_email = (old or {}).get("email") or email or f"chat:{cid}"
+            day = (started or "")[:10] or None
+            datereg = str(h["datereg"] or "")[:10]
+            for t in types:
+                exact_reg = t == "REG" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", datereg)
+                if record_event(conn, email=key_email, event_type=t, event_date=datereg if exact_reg else day,
+                                amount=h["amount"] if t == "FTD" else None, source="chatterfy", chat_id=cid,
+                                broker_id=uid, metadata={"from": "history", "approx": not exact_reg, "by": admin}):
+                    written += 1
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Импорт истории не удался: {type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
+    return {**stats, "applied": True, "events_written": written, "samples": samples}
 
 
 @app.post("/api/v1/broker/fxpro/import")
@@ -2587,7 +2777,7 @@ def load_broker_accounts(conn, broker=None):
 
 
 DATA_SINCE_KEY = "data_since"
-DATA_SINCE_DEFAULT = os.getenv("DATA_SINCE", "2026-10-09")  # team decided to count only from this day (Turkey time)
+DATA_SINCE_DEFAULT = os.getenv("DATA_SINCE", "2026-08-01")  # first day the CRM counts (Turkey time); admin can change it
 
 
 def data_since(conn):
@@ -2611,7 +2801,7 @@ def build_leads(conn, viewer, accounts=None):
         "SELECT chat_id, email, click_id, attribution_json, first_seen_at, updated_at, phone, uid FROM chatterfy_leads"
     ).fetchall()
     event_rows = conn.execute(
-        "SELECT email, event_type, event_date, amount, created_at FROM crm_events WHERE source='chatterfy'"
+        "SELECT email, event_type, event_date, amount, created_at, metadata_json FROM crm_events WHERE source='chatterfy'"
     ).fetchall()
     if accounts is None:
         accounts = load_broker_accounts(conn)
@@ -2666,14 +2856,17 @@ def build_leads(conn, viewer, accounts=None):
         ftd_amount = None
         last_event_at = None
         event_at = {}
+        approx_at = {}  # REG/FTD brought from Chatterfy history: the day is a guess, exact dates win
         dated_events = []  # REG/FTD/FT with a real date (not the day a tag export was imported)
         for ev in evs:
             t = str(ev["event_type"] or "").upper()
-            if ev["event_date"] and t in STAGE_ORDER:
+            approx = '"approx": true' in (ev["metadata_json"] or "")
+            if ev["event_date"] and t in STAGE_ORDER and not approx:
                 dated_events.append(str(ev["event_date"]))
             when = ev["event_date"] or ev["created_at"]
-            if when and (t not in event_at or str(when) < event_at[t]):
-                event_at[t] = str(when)
+            bucket = approx_at if approx else event_at
+            if when and (t not in bucket or str(when) < bucket[t]):
+                bucket[t] = str(when)
             if STAGE_ORDER.get(t, -1) > STAGE_ORDER[stage]:
                 stage = t
             if t == "FTD" and ev["amount"] is not None:
@@ -2708,8 +2901,10 @@ def build_leads(conn, viewer, accounts=None):
             "assignee": w.get("assignee"),
             "work_status": w.get("work_status") or "new",
             "callback_at": w.get("callback_at"),
-            "reg_at": event_at.get("REG"),
-            "ftd_at": event_at.get("FTD"),
+            "reg_at": event_at.get("REG") or approx_at.get("REG"),
+            "ftd_at": event_at.get("FTD") or approx_at.get("FTD"),
+            "reg_approx": "REG" not in event_at and "REG" in approx_at,
+            "ftd_approx": "FTD" not in event_at and "FTD" in approx_at,
             "notes": note_counts.get(key, 0),
             "last_activity": activity or None,
             "_progress_dates": dated_events + [d for a in matched for d in (a.get("registration_date"), a.get("ftd_date")) if d],
@@ -3499,9 +3694,9 @@ def stats_overview(days: int = 7, x_telegram_username: str = Depends(current_use
         accs = x.get("matched_accounts") or []
         rank = STAGE_ORDER.get(x["stage"], 0)
         has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
-        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at"))
+        reg_day = funnel_dates(x, accs)[0]
         is_reg = bool(reg_day) or rank >= STAGE_ORDER["REG"] or bool(accs)
-        ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
+        ftd_day = funnel_dates(x, accs)[1]
         is_ftd = bool(ftd_day) or rank >= STAGE_ORDER["FTD"] or has_dep
         if is_ftd and not ftd_day:
             ftd_day = _stat_day(x.get("last_activity"))
@@ -3834,8 +4029,8 @@ def stats_buying(days: int = 7, level: str = "campaign", x_telegram_username: st
         rank = STAGE_ORDER.get(x["stage"], 0)
         has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
         lead_day = _stat_day(x.get("first_seen_at"))
-        reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at")) or (lead_day if (rank >= 1 or accs) else None)
-        ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
+        reg_day = funnel_dates(x, accs)[0] or (lead_day if (rank >= 1 or accs) else None)
+        ftd_day = funnel_dates(x, accs)[1] or (lead_day if (rank >= 2 or has_dep) else None)
         dialog = bool(x.get("dialog_at")) or bool(reg_day) or bool(ftd_day)
         key, label = group_key(x.get("campaign") or "Без кампании", x.get("adset") or "", x.get("ad") or "")
         b = g(key, label)
@@ -4977,6 +5172,31 @@ def require_buyer_access(username, conn):
     return user
 
 
+def funnel_dates(x, accs=None):
+    """(registration day, FTD day) of a lead from its events and broker accounts, None when unknown.
+
+    Exact dates (Chatterfy webhook, broker report) win over approximate ones brought from the
+    Chatterfy history. A deposit without a REG step means the client had registered by then,
+    so the FTD day stands in for the registration day."""
+    accs = (x.get("matched_accounts") or []) if accs is None else accs
+    reg_exact = None if x.get("reg_approx") else x.get("reg_at")
+    ftd_exact = None if x.get("ftd_approx") else x.get("ftd_at")
+    ftd = (_min_day(ftd_exact, *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
+           or (_stat_day(x.get("ftd_at")) if x.get("ftd_approx") else None))
+    reg = (_min_day(reg_exact, *[a.get("registration_date") for a in accs]) or _stat_day(ftd_exact)
+           or (_stat_day(x.get("reg_at")) if x.get("reg_approx") else None) or ftd)
+    return reg, ftd
+
+
+def exact_funnel_dates(x, accs=None):
+    """(registration day, FTD day) from exact sources only: for timings such as days to FTD."""
+    accs = (x.get("matched_accounts") or []) if accs is None else accs
+    ftd = _min_day(None if x.get("ftd_approx") else x.get("ftd_at"),
+                   *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
+    reg = _min_day(None if x.get("reg_approx") else x.get("reg_at"), *[a.get("registration_date") for a in accs])
+    return reg, ftd
+
+
 def lead_funnel_days(x):
     """Lead, registration and first-deposit days of a lead plus its deposit sum (same rules as the buying stats).
 
@@ -4986,8 +5206,8 @@ def lead_funnel_days(x):
     rank = STAGE_ORDER.get(x["stage"], 0)
     has_dep = any(broker_lib.account_has_deposit(a) for a in accs)
     lead_day = _stat_day(x.get("first_seen_at"))
-    reg_day = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs]) or _stat_day(x.get("ftd_at")) or (lead_day if (rank >= 1 or accs) else None)
-    ftd_day = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)]) or (lead_day if (rank >= 2 or has_dep) else None)
+    reg_day = funnel_dates(x, accs)[0] or (lead_day if (rank >= 1 or accs) else None)
+    ftd_day = funnel_dates(x, accs)[1] or (lead_day if (rank >= 2 or has_dep) else None)
     deposit = sum(float(a.get("deposits") or 0) for a in accs) or float(x.get("ftd_amount") or 0)
     return lead_day, reg_day, ftd_day, deposit if ftd_day else 0.0
 
@@ -5733,8 +5953,7 @@ def cohorts_weekly(weeks: int = 12, geo: str = "", x_telegram_username: str = De
         accs = x.get("matched_accounts") or []
         # The real FTD date (Chatterfy event or the broker report). Without it ftd_day falls back to the lead day,
         # which would show a false «same day», so such FTDs count but stay out of the timing.
-        ftd_known = _min_day(x.get("ftd_at"), *[a.get("ftd_date") for a in accs if broker_lib.account_has_deposit(a)])
-        reg_known = _min_day(x.get("reg_at"), *[a.get("registration_date") for a in accs])
+        reg_known, ftd_known = exact_funnel_dates(x, accs)
         rows.append({
             "lead_key": x["lead_key"], "lead_day": lead_day, "reg": bool(reg_day), "ftd_day": ftd_day,
             "days_to_ftd": _days_between(lead_day, ftd_known) if ftd_known else None,

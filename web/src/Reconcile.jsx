@@ -102,6 +102,7 @@ export default function Reconcile({ username, isAdmin }) {
           )} />
       </>}
 
+      {isAdmin && <HistorySettings username={username} onDone={load} />}
       {isAdmin && <ChatterfyPush username={username} />}
       {isAdmin && <ChatterfyUpload username={username} onDone={load} />}
       {isAdmin && <BrokerUpload username={username} brokers={data?.brokers || []} onDone={load} />}
@@ -164,6 +165,62 @@ function ChatterfyPush({ username }) {
         <button className="load-more" disabled={busy || !(url || Object.values(geoUrls).some(Boolean))} onClick={() => push(false)}>Отправить сейчас</button>
       </div>
       {saved?.pushes && Object.keys(saved.pushes).length > 0 && <p className="recon-hint">Уже отправлено: {saved.pushes.sent || 0}{saved.pushes.failed ? ` · с ошибкой: ${saved.pushes.failed}` : ""}</p>}
+      {msg && <div className="team-message">{msg}</div>}
+    </div>
+  );
+}
+
+// From which day the CRM counts, and the main bot's past chats brought in from Chatterfy.
+function HistorySettings({ username, onDone }) {
+  const [since, setSince] = useState("");
+  const [saved, setSaved] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [preview, setPreview] = useState(null);
+  useEffect(() => {
+    api("/api/v1/settings/data-since", { username }).then(r => { setSaved(r); setSince(r.since || ""); }).catch(e => setMsg(e.message));
+  }, [username]);
+
+  async function saveSince() {
+    setBusy(true); setMsg("");
+    try {
+      const r = await api("/api/v1/settings/data-since", { username, method: "POST", body: { since } });
+      setSaved(s => ({ ...s, since: r.since })); setMsg(r.since ? `CRM считает данные с ${r.since}.` : "CRM считает всю историю.");
+      onDone?.();
+    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  }
+  async function history(apply) {
+    setBusy(true); setMsg(apply ? "Записываю историю…" : "Читаю чаты в Chatterfy… до минуты.");
+    try {
+      const r = await api(`/api/v1/chatterfy/history?apply=${apply}`, { username, method: "POST", timeout: 180000 });
+      setPreview(r);
+      setMsg(apply ? `Готово: новых лидов ${r.new_leads}, записано событий ${r.events_written}.` : "");
+      if (apply) onDone?.();
+    } catch (e) { setMsg(e.message); } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="recon-upload">
+      <div className="section-title">История и дата начала учёта</div>
+      <p className="recon-hint">CRM не показывает лиды, реги и депы раньше этой даты — во всех вкладках: статистика, P&L, когорты, ЗП.</p>
+      <div className="note-form">
+        <input type="date" value={since} onChange={e => setSince(e.target.value)} />
+        <button className="primary" disabled={busy || since === (saved?.since || "")} onClick={saveSince}>Сохранить дату</button>
+      </div>
+
+      <p className="recon-hint">Подтянуть историю из Chatterfy: прошлые чаты основного бота — лиды с датой старта и рекламной меткой, а также REG и FTD по тегам, этапу воронки и полю «Событие брокера», с суммой депа и UID клиента. Дня старого депа в Chatterfy нет, поэтому такие события получают дату старта чата с пометкой «приблизительно»: точные даты из вебхука и отчёта FxPro всегда важнее, а во «время до FTD» они не входят.</p>
+      <div className="pay-actions">
+        <button className="mini-btn" disabled={busy} onClick={() => history(false)}>Проверить, что найдётся</button>
+        {preview && !preview.applied && <button className="upload-btn" disabled={busy} onClick={() => history(true)}>Записать в CRM</button>}
+      </div>
+      {preview && <div className="team-message">
+        <b>Чатов в Chatterfy: {preview.chats}</b> (самый старый — {preview.oldest ? preview.oldest.slice(0, 10) : "—"}).
+        Новых для CRM: {preview.new_leads}, уже есть: {preview.existing}. REG: {preview.reg}, FTD: {preview.ftd} (с суммой: {preview.ftd_with_amount}).
+        С UID / почтой: {preview.with_uid}, с рекламной меткой: {preview.with_campaign}.
+        {preview.samples?.length > 0 && <div className="history-samples">{preview.samples.map((s, i) =>
+          <div key={i}>{s.name || "—"} · {s.started ? s.started.slice(0, 10) : "—"} · {s.events.join(", ")}{s.amount ? ` · $${s.amount}` : ""}{s.uid ? ` · ${s.uid}` : ""}{s.campaign ? ` · ${s.campaign}` : ""}</div>)}</div>}
+        {!preview.applied && preview.chats > 0 && !preview.reg && <div>REG и FTD не нашлись — пришли скриншот этого блока, проверю, где Chatterfy хранит теги и этапы.</div>}
+      </div>}
       {msg && <div className="team-message">{msg}</div>}
     </div>
   );
