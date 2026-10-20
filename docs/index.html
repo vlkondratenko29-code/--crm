@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Risk Hesaplayıcı</title>
+<meta name="description" content="Depozito ve stop-loss'a göre her işlemde ne kadar riske girdiğini ve hangi lotu açman gerektiğini hesapla.">
+<meta property="og:title" content="Risk Hesaplayıcı">
+<meta property="og:description" content="Depozito ve stop-loss'a göre işlem başına risk, lot ve marjin.">
+<meta property="og:type" content="website">
+<meta name="robots" content="noindex">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}[hidden]{display:none!important}</style>
+</head>
+<body><link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: two-panel trading ticket — order inputs on the left, risk readout on the right; stacks on phones. */
+:root{
+  --bg:#eef1f4; --panel:#ffffff; --ink:#18202b; --muted:#5e6b7a; --line:#d6dde5;
+  --accent:#1f6f8b; --accent-ink:#ffffff; --field:#f6f8fa;
+  --ok:#1d8a5b; --warn:#b7791f; --high:#c2571a; --bad:#c0362c;
+  --ok-bg:#e3f4ec; --warn-bg:#fbf1dd; --high-bg:#fbe7da; --bad-bg:#f9e1df;
+  --display:"Onest",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --body:"Onest",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#10161d; --panel:#18212b; --ink:#e6ecf2; --muted:#93a1b0; --line:#2a3642;
+  --accent:#5cb3d1; --accent-ink:#0b1a22; --field:#121a22;
+  --ok:#4fc28c; --warn:#e2ac4f; --high:#f08a4b; --bad:#f06b60;
+  --ok-bg:#163327; --warn-bg:#3a2d14; --high-bg:#3c2416; --bad-bg:#3d1b19; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#10161d; --panel:#18212b; --ink:#e6ecf2; --muted:#93a1b0; --line:#2a3642;
+  --accent:#5cb3d1; --accent-ink:#0b1a22; --field:#121a22;
+  --ok:#4fc28c; --warn:#e2ac4f; --high:#f08a4b; --bad:#f06b60;
+  --ok-bg:#163327; --warn-bg:#3a2d14; --high-bg:#3c2416; --bad-bg:#3d1b19; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.45;
+  padding-block:20px 40px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1060px;margin:0 auto;display:grid;gap:18px}
+header{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
+h1{font-family:var(--display);font-weight:800;font-size:clamp(24px,4vw,32px);letter-spacing:-.02em;margin:0;text-wrap:balance}
+.sub{color:var(--muted);margin:4px 0 0;max-width:60ch}
+.lang{display:flex;border:1px solid var(--line);border-radius:999px;padding:3px;background:var(--panel)}
+.lang button{border:0;background:none;color:var(--muted);font:600 13px var(--body);padding:6px 12px;border-radius:999px;cursor:pointer}
+.lang button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.grid{display:grid;grid-template-columns:minmax(0,380px) minmax(0,1fr);gap:18px;align-items:start}
+@media (max-width:820px){.grid{grid-template-columns:minmax(0,1fr)}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;display:grid;gap:14px;min-width:0}
+.label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.field{display:grid;gap:6px}
+.row2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+input,select{width:100%;min-width:0;background:var(--field);border:1px solid var(--line);border-radius:9px;color:var(--ink);
+  font:500 16px var(--mono);padding:10px 11px}
+select{font-family:var(--body)}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.seg{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);border-radius:10px;padding:3px;background:var(--field)}
+.seg button{border:0;background:none;color:var(--muted);font:600 13px var(--body);padding:8px;border-radius:7px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--panel);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.hint{font-size:12px;color:var(--muted)}
+.verdict{border-radius:12px;padding:14px 16px;display:grid;gap:4px;border:1px solid transparent}
+.verdict b{font-size:18px}
+.lvl-ok{background:var(--ok-bg);color:var(--ok)} .lvl-warn{background:var(--warn-bg);color:var(--warn)}
+.lvl-high{background:var(--high-bg);color:var(--high)} .lvl-bad{background:var(--bad-bg);color:var(--bad)}
+.verdict p{margin:0;color:var(--ink);font-size:14px}
+.meter{position:relative;height:10px;border-radius:999px;background:linear-gradient(90deg,var(--ok) 0 25%,var(--warn) 25% 50%,var(--high) 50% 75%,var(--bad) 75% 100%);opacity:.9}
+.meter i{position:absolute;top:-5px;width:4px;height:20px;border-radius:2px;background:var(--ink);transform:translateX(-50%);transition:left .2s}
+.scale{display:flex;justify-content:space-between;font:500 11px var(--mono);color:var(--muted)}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:520px){.stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.stat{border:1px solid var(--line);border-radius:11px;padding:11px 12px;display:grid;gap:3px;min-width:0}
+.stat span{font-size:12px;color:var(--muted)}
+.stat b{font:700 19px var(--mono);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.stat small{font-size:11.5px;color:var(--muted)}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+th,td{padding:8px 6px;text-align:right;border-bottom:1px solid var(--line);font-size:14px}
+th{font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+th:first-child,td:first-child{text-align:left}
+td{font-family:var(--mono)}
+.bar{display:inline-block;height:8px;border-radius:4px;background:var(--accent);vertical-align:middle;margin-right:8px}
+.tbl{overflow-x:auto}
+.warnbox{border-left:3px solid var(--bad);padding:8px 12px;background:var(--bad-bg);border-radius:0 9px 9px 0;font-size:14px}
+.foot{color:var(--muted);font-size:12px;max-width:80ch}
+@media (prefers-reduced-motion:reduce){.meter i{transition:none}}
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1 data-t="title">Risk hesaplayıcı</h1>
+      <p class="sub" data-t="sub">Depozito ve stop-loss'a göre her işlemde ne kadar riske girdiğini gör.</p>
+    </div>
+    <div class="lang" role="group" aria-label="Language">
+      <button id="lang-tr" type="button" aria-pressed="true">TR</button>
+      <button id="lang-ru" type="button" aria-pressed="false">RU</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <form class="panel" id="form" autocomplete="off">
+      <div class="field"><label class="label" for="deposit" data-t="deposit">Depozito, $</label>
+        <input id="deposit" type="number" inputmode="decimal" min="0" step="any" value="500"></div>
+
+      <div class="field"><label class="label" for="symbol" data-t="symbol">Enstrüman</label>
+        <select id="symbol"></select></div>
+
+      <div class="row2">
+        <div class="field"><label class="label" for="entry" data-t="entry">Giriş fiyatı</label>
+          <input id="entry" type="number" inputmode="decimal" step="any"></div>
+        <div class="field"><label class="label" for="stop" data-t="stop">Stop-loss</label>
+          <input id="stop" type="number" inputmode="decimal" step="any"></div>
+      </div>
+      <div class="field"><label class="label" for="tp" data-t="tp">Take-profit (isteğe bağlı)</label>
+        <input id="tp" type="number" inputmode="decimal" step="any"></div>
+
+      <div class="field">
+        <span class="label" data-t="mode">Ne hesaplansın?</span>
+        <div class="seg" role="group">
+          <button id="mode-pct" type="button" aria-pressed="true" data-t="modePct">Risk % → lot</button>
+          <button id="mode-lot" type="button" aria-pressed="false" data-t="modeLot">Lot → risk</button>
+        </div>
+      </div>
+      <div class="field" id="pct-field"><label class="label" for="riskPct" data-t="riskPct">İşlem başına risk, %</label>
+        <input id="riskPct" type="number" inputmode="decimal" min="0" step="0.1" value="2"></div>
+      <div class="field" id="lot-field" hidden><label class="label" for="lots" data-t="lots">Lot</label>
+        <input id="lots" type="number" inputmode="decimal" min="0" step="0.01" value="0.10"></div>
+
+      <div class="row2">
+        <div class="field"><label class="label" for="leverage" data-t="leverage">Kaldıraç</label>
+          <select id="leverage"><option value="30">1:30</option><option value="100">1:100</option><option value="200">1:200</option><option value="500" selected>1:500</option><option value="1000">1:1000</option></select></div>
+        <div class="field"><label class="label" for="contract" data-t="contract">Kontrat (1 lot)</label>
+          <input id="contract" type="number" inputmode="decimal" min="0" step="any"></div>
+      </div>
+      <p class="hint" data-t="contractHint">Kontrat büyüklüğünü FxPro terminalindeki sembol özelliklerinden kontrol et.</p>
+    </form>
+
+    <section class="panel" aria-live="polite">
+      <div class="verdict" id="verdict"><b id="v-title"></b><p id="v-text"></p></div>
+      <div>
+        <div class="meter"><i id="needle"></i></div>
+        <div class="scale"><span>0%</span><span>1%</span><span>2%</span><span>5%</span><span>10%+</span></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><span data-t="sRisk">Risk</span><b id="o-risk"></b><small id="o-riskpct"></small></div>
+        <div class="stat"><span data-t="sLot">Lot</span><b id="o-lot"></b><small id="o-dist"></small></div>
+        <div class="stat"><span data-t="sProfit">Hedefte kazanç</span><b id="o-profit"></b><small id="o-rr"></small></div>
+        <div class="stat"><span data-t="sMargin">Teminat (marjin)</span><b id="o-margin"></b><small id="o-marginpct"></small></div>
+        <div class="stat"><span data-t="sWipe">Stopsuz sıfırlanma</span><b id="o-wipe"></b><small id="o-wipepct"></small></div>
+        <div class="stat"><span data-t="sHalf">Depozitonun yarısı</span><b id="o-half"></b><small data-t="sHalfSmall">üst üste stop sonrası</small></div>
+      </div>
+      <div class="warnbox" id="warn" hidden></div>
+      <div>
+        <div class="label" style="margin-bottom:6px" data-t="streak">Üst üste stop olursa</div>
+        <div class="tbl"><table>
+          <thead><tr><th data-t="thLosses">Stop</th><th data-t="thBalance">Kalan bakiye</th><th data-t="thDown">Kayıp</th></tr></thead>
+          <tbody id="streak"></tbody>
+        </table></div>
+      </div>
+      <p class="foot" data-t="foot">Hesaplama yaklaşıktır: spread, komisyon, swap ve kayma dahil değildir. Forex ve CFD işlemleri yüksek risk taşır; sadece kaybetmeyi göze alabileceğin parayla işlem yap.</p>
+    </section>
+  </div>
+</div>
+
+<script>
+// Instrument presets. contract = units per 1 lot; quote = currency the price is in; pip = pip size for FX.
+const SYMBOLS = [
+  {id:"XAUUSD", name:"XAUUSD · Gold", contract:100, quote:"USD", entry:2650, stop:2640, tp:2675},
+  {id:"EURUSD", name:"EURUSD", contract:100000, quote:"USD", pip:0.0001, entry:1.0850, stop:1.0820, tp:1.0910},
+  {id:"GBPUSD", name:"GBPUSD", contract:100000, quote:"USD", pip:0.0001, entry:1.2700, stop:1.2660, tp:1.2780},
+  {id:"USDJPY", name:"USDJPY", contract:100000, quote:"JPY", pip:0.01, entry:150.00, stop:149.60, tp:150.80},
+  {id:"BRENT", name:"BRENT · Oil", contract:100, quote:"USD", entry:75.00, stop:74.20, tp:76.60},
+  {id:"US30", name:"US30 · Dow", contract:1, quote:"USD", entry:42000, stop:41850, tp:42300},
+  {id:"NAS100", name:"NAS100 · Nasdaq", contract:1, quote:"USD", entry:20000, stop:19900, tp:20200},
+];
+
+const T = {
+  tr:{title:"Risk hesaplayıcı", sub:"Depozito ve stop-loss'a göre her işlemde ne kadar riske girdiğini gör.",
+    deposit:"Depozito, $", symbol:"Enstrüman", entry:"Giriş fiyatı", stop:"Stop-loss", tp:"Take-profit (isteğe bağlı)",
+    mode:"Ne hesaplansın?", modePct:"Risk % → lot", modeLot:"Lot → risk", riskPct:"İşlem başına risk, %", lots:"Lot",
+    leverage:"Kaldıraç", contract:"Kontrat (1 lot)", contractHint:"Kontrat büyüklüğünü FxPro terminalindeki sembol özelliklerinden kontrol et.",
+    sRisk:"Risk", sLot:"Lot", sProfit:"Hedefte kazanç", sMargin:"Teminat (marjin)", sWipe:"Stopsuz sıfırlanma", sHalf:"Depozitonun yarısı",
+    sHalfSmall:"üst üste stop sonrası", streak:"Üst üste stop olursa", thLosses:"Stop", thBalance:"Kalan bakiye", thDown:"Kayıp",
+    foot:"Hesaplama yaklaşıktır: spread, komisyon, swap ve kayma dahil değildir. Forex ve CFD işlemleri yüksek risk taşır; sadece kaybetmeyi göze alabileceğin parayla işlem yap.",
+    ofDeposit:"depozitonun", perTrade:"işlem başına", dist:"stop mesafesi", pips:"pip", points:"puan",
+    noTp:"TP girilmedi", rr:"risk/kazanç 1:", winNeeded:"başabaş için kazanma oranı", priceMove:"fiyat hareketi", ofPrice:"fiyatın",
+    losses:n=>`${n} stop`, never:"çok uzak",
+    lv:[["Sakin","İşlem başına %1'e kadar: uzun vadede hayatta kalmak için en sağlıklı seviye."],
+        ["Normal","%1–2: çoğu profesyonelin kullandığı aralık. Kayıp serileri hesabı bitirmez."],
+        ["Yüksek","%2–5: birkaç stop üst üste gelirse depozito hızla erir. Lotu küçültmeyi düşün."],
+        ["Tehlikeli","%5'in üstü: kötü bir seri hesabı sıfırlayabilir. Bu riskle işlem açma."]],
+    noStop:"Stop-loss girişe eşit ya da boş: stopsuz işlemde risk tüm depozitodur.",
+    lotTooSmall:"Bu risk ve stop ile lot 0.01'in altında kalıyor: stopu daralt ya da riski artırma, işlemi atla.",
+    marginHigh:"Teminat depozitonun yarısından fazla: küçük bir hareket marjin çağrısına yol açabilir."},
+  ru:{title:"Калькулятор риска", sub:"Сколько клиент рискует в каждой сделке при своём депозите и стопе.",
+    deposit:"Депозит, $", symbol:"Инструмент", entry:"Цена входа", stop:"Стоп-лосс", tp:"Тейк-профит (необязательно)",
+    mode:"Что считаем?", modePct:"Риск % → лот", modeLot:"Лот → риск", riskPct:"Риск на сделку, %", lots:"Лот",
+    leverage:"Плечо", contract:"Контракт (1 лот)", contractHint:"Размер контракта проверь в спецификации символа в терминале FxPro.",
+    sRisk:"Риск", sLot:"Лот", sProfit:"Прибыль на цели", sMargin:"Залог (маржа)", sWipe:"Обнуление без стопа", sHalf:"Половина депозита",
+    sHalfSmall:"после стопов подряд", streak:"Если стопы пойдут подряд", thLosses:"Стопов", thBalance:"Останется", thDown:"Потеря",
+    foot:"Расчёт примерный: без спреда, комиссии, свопа и проскальзывания. Торговля на форекс и CFD связана с высоким риском; торгуй только теми деньгами, которые готов потерять.",
+    ofDeposit:"от депозита", perTrade:"на сделку", dist:"до стопа", pips:"пипс", points:"пунктов",
+    noTp:"тейк не указан", rr:"риск/прибыль 1:", winNeeded:"нужно выигрывать для нуля", priceMove:"движение цены", ofPrice:"от цены",
+    losses:n=>`${n} стоп${n===1?"":n<5?"а":"ов"}`, never:"очень далеко",
+    lv:[["Спокойно","До 1% на сделку: самый здоровый уровень, чтобы продержаться долго."],
+        ["Нормально","1–2%: так работает большинство профессионалов. Серия убытков счёт не убьёт."],
+        ["Высокий","2–5%: несколько стопов подряд быстро съедят депозит. Стоит уменьшить лот."],
+        ["Опасно","Больше 5%: одна плохая серия может обнулить счёт. С таким риском не входить."]],
+    noStop:"Стоп равен цене входа или не указан: без стопа под риском весь депозит.",
+    lotTooSmall:"При таком риске и стопе лот меньше 0.01: сузь стоп или пропусти сделку, но не поднимай риск.",
+    marginHigh:"Залог больше половины депозита: небольшое движение может привести к маржин-коллу."},
+};
+
+let lang = "tr", mode = "pct";
+try { lang = localStorage.getItem("riskcalc-lang") || "tr"; } catch (e) {}
+const $ = id => document.getElementById(id);
+const num = id => { const v = parseFloat(String($(id).value).replace(",", ".")); return isFinite(v) ? v : NaN; };
+const usd = v => isFinite(v) ? "$" + v.toLocaleString(lang === "tr" ? "tr-TR" : "ru-RU", {minimumFractionDigits: v < 100 ? 2 : 0, maximumFractionDigits: v < 100 ? 2 : 0}) : "—";
+const pct = v => isFinite(v) ? (v < 10 ? v.toFixed(2) : v.toFixed(1)).replace(/\.?0+$/, "") + "%" : "—";
+const fmtPrice = (v, s) => isFinite(v) ? v.toFixed(s.pip ? (s.pip < 0.01 ? 4 : 2) : 2) : "—";
+
+SYMBOLS.forEach(s => $("symbol").add(new Option(s.name, s.id)));
+function sym() { return SYMBOLS.find(s => s.id === $("symbol").value); }
+function loadPreset() {
+  const s = sym();
+  $("entry").value = s.entry; $("stop").value = s.stop; $("tp").value = s.tp; $("contract").value = s.contract;
+}
+
+function applyLang() {
+  const t = T[lang];
+  document.documentElement.lang = lang;
+  document.querySelectorAll("[data-t]").forEach(el => { const v = t[el.dataset.t]; if (typeof v === "string") el.textContent = v; });
+  document.title = t.title;
+  $("lang-tr").setAttribute("aria-pressed", lang === "tr"); $("lang-ru").setAttribute("aria-pressed", lang === "ru");
+  calc();
+}
+
+function calc() {
+  const t = T[lang], s = sym();
+  const dep = num("deposit"), entry = num("entry"), stop = num("stop"), tp = num("tp");
+  const contract = num("contract"), lev = num("leverage");
+  const dist = Math.abs(entry - stop);
+  // Dollar value of a 1.00 price move for one lot (JPY-quoted pairs convert through the price).
+  const perMove = s.quote === "JPY" ? contract / entry : contract;
+  let lots, riskUsd, lotTooSmall = false;
+  if (mode === "pct") {
+    const want = dep * num("riskPct") / 100;
+    lots = Math.floor((want / (dist * perMove)) * 100 + 1e-9) / 100;
+    if (dist > 0 && lots < 0.01) { lotTooSmall = true; lots = 0.01; }
+  } else {
+    lots = num("lots");
+  }
+  riskUsd = lots * dist * perMove;
+  const riskPct = riskUsd / dep * 100;
+  const noStop = !(dist > 0);
+  const effPct = noStop ? 100 : riskPct;
+
+  // Verdict
+  const lvl = effPct <= 1 ? 0 : effPct <= 2 ? 1 : effPct <= 5 ? 2 : 3;
+  const [vt, vx] = t.lv[lvl];
+  $("verdict").className = "verdict " + ["lvl-ok", "lvl-warn", "lvl-high", "lvl-bad"][lvl];
+  $("v-title").textContent = `${vt} · ${pct(effPct)} ${t.perTrade}`;
+  $("v-text").textContent = vx;
+  // Meter scale: 0,1,2,5,10 at 0,25,50,75,100% (piecewise linear).
+  const stops = [[0, 0], [1, 25], [2, 50], [5, 75], [10, 100]];
+  let pos = 100;
+  for (let i = 1; i < stops.length; i++) if (effPct <= stops[i][0]) { const [a, pa] = stops[i - 1], [b, pb] = stops[i]; pos = pa + (effPct - a) / (b - a) * (pb - pa); break; }
+  $("needle").style.left = Math.max(0, Math.min(100, pos)) + "%";
+
+  // Stats
+  $("o-risk").textContent = noStop ? usd(dep) : usd(riskUsd);
+  $("o-riskpct").textContent = `${pct(effPct)} ${t.ofDeposit}`;
+  $("o-lot").textContent = isFinite(lots) ? lots.toFixed(2) : "—";
+  const distLabel = s.pip ? `${(dist / s.pip).toFixed(1)} ${t.pips}` : `${fmtPrice(dist, s)} ${t.points}`;
+  $("o-dist").textContent = `${t.dist}: ${noStop ? "—" : distLabel}`;
+  if (isFinite(tp) && tp !== entry && !noStop) {
+    const gain = lots * Math.abs(tp - entry) * perMove, rr = Math.abs(tp - entry) / dist;
+    $("o-profit").textContent = usd(gain);
+    $("o-rr").textContent = `${t.rr}${rr.toFixed(1)} · ${t.winNeeded} ${pct(100 / (1 + rr))}`;
+  } else { $("o-profit").textContent = "—"; $("o-rr").textContent = t.noTp; }
+  const notional = s.quote === "JPY" ? lots * contract : lots * contract * entry;
+  const margin = notional / lev;
+  $("o-margin").textContent = usd(margin);
+  $("o-marginpct").textContent = `${pct(margin / dep * 100)} ${t.ofDeposit} · 1:${lev}`;
+  const wipeMove = dep / (lots * perMove);
+  $("o-wipe").textContent = isFinite(wipeMove) ? fmtPrice(wipeMove, s) : "—";
+  $("o-wipepct").textContent = `${t.priceMove} · ${pct(wipeMove / entry * 100)} ${t.ofPrice}`;
+
+  // Losing streak: in % mode the lot shrinks with the balance (fixed %), in lot mode the loss per stop is fixed.
+  const r = Math.min(effPct, 100) / 100;
+  const balAfter = n => mode === "pct" && !noStop ? dep * Math.pow(1 - r, n) : Math.max(0, dep - n * (noStop ? dep : riskUsd));
+  let half = "—";
+  for (let n = 1; n <= 500; n++) if (balAfter(n) <= dep / 2) { half = t.losses(n); break; }
+  $("o-half").textContent = half === "—" ? t.never : half;
+  const rows = [1, 3, 5, 10, 20].map(n => {
+    const b = balAfter(n), down = (1 - b / dep) * 100, w = Math.max(2, Math.round(b / dep * 80));
+    return `<tr><td>${t.losses(n)}</td><td><span class="bar" style="width:${w}px"></span>${usd(b)}</td><td>−${pct(down)}</td></tr>`;
+  });
+  $("streak").innerHTML = rows.join("");
+
+  // Warnings
+  const warns = [];
+  if (noStop) warns.push(t.noStop);
+  if (lotTooSmall) warns.push(t.lotTooSmall);
+  if (margin > dep / 2) warns.push(t.marginHigh);
+  $("warn").hidden = !warns.length;
+  $("warn").textContent = warns.join(" ");
+}
+
+function setMode(m) {
+  mode = m;
+  $("mode-pct").setAttribute("aria-pressed", m === "pct"); $("mode-lot").setAttribute("aria-pressed", m === "lot");
+  $("pct-field").hidden = m !== "pct"; $("lot-field").hidden = m !== "lot";
+  calc();
+}
+
+$("symbol").addEventListener("change", () => { loadPreset(); calc(); });
+$("form").addEventListener("input", calc);
+$("form").addEventListener("submit", e => e.preventDefault());
+$("mode-pct").addEventListener("click", () => setMode("pct"));
+$("mode-lot").addEventListener("click", () => setMode("lot"));
+["tr", "ru"].forEach(l => $("lang-" + l).addEventListener("click", () => { lang = l; try { localStorage.setItem("riskcalc-lang", l); } catch (e) {} applyLang(); }));
+loadPreset();
+applyLang();
+</script>
+
+</body>
+</html>
